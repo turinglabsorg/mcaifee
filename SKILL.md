@@ -77,11 +77,11 @@ For proposed packages:
 mcaifee scan react@18.2.0 react-dom@18.2.0 --online
 ```
 
-Use `--online` only when network access is allowed. It calls `npm view` for live registry metadata and never executes package code.
+Use `--online` only when network access is allowed. It calls `npm view` for live registry metadata and runs supported package-manager advisory audits (`npm audit` for npm lockfiles, `pnpm audit` for pnpm lockfiles) without executing package code.
 
 If the `mcaifee` binary is not installed, use the release artifact from `https://github.com/turinglabsorg/mcaifee/releases` or run from source with `cargo run --`.
 
-Mcaifee's built-in checks are local heuristics, local source database matches, registry metadata, lockfile analysis, and optional Docker behavior analysis. It parses npm, pnpm, Yarn, and Bun text lockfiles; `bun.lockb` is detected as a binary legacy lockfile that must be converted for full static audit. For advisory databases, use npm audit, OSV.dev, GitHub Advisory Database, and OpenSSF malicious-packages as supporting evidence; do not treat any single DB as complete for npm malware. Read `references/npm-security-sources.md` and `references/source-integration-plan.md` when choosing external security feeds or implementing source integrations.
+Mcaifee's built-in checks are local heuristics, local source database matches, registry metadata, npm/pnpm advisory audit, lockfile analysis, and optional Docker behavior analysis. It parses npm, pnpm, Yarn, and Bun text lockfiles; `bun.lockb` is detected as a binary legacy lockfile that must be converted for full static audit. For advisory databases beyond npm/pnpm audit, use OSV.dev, GitHub Advisory Database, and OpenSSF malicious-packages as supporting evidence; do not treat any single DB as complete for npm malware. Read `references/npm-security-sources.md` and `references/source-integration-plan.md` when choosing external security feeds or implementing source integrations.
 
 To verify the install gate against a local malicious npm package:
 
@@ -101,7 +101,7 @@ docker build -f Dockerfile.malicious-test .
    - Prefer `mcaifee npm ...`, `mcaifee pnpm ...`, `mcaifee yarn ...`, or `mcaifee bun ...` instead of calling the package manager directly.
    - Run `mcaifee db update` when network access is allowed so confirmed malicious package records are available locally; wrapper mode also refreshes the default database automatically when it is older than 24 hours.
    - Run `mcaifee scan` against package specs, `package.json`, and lockfiles for review-only tasks.
-   - Run `npm audit --json` in projects that already have a lockfile.
+   - Run `mcaifee report --online` in projects that already have a supported lockfile so npm/pnpm audit advisory findings are included in the Mcaifee report.
    - Run `npm audit signatures --json --include-attestations` when packages are already downloaded and npm supports registry signatures/provenance for the registry.
    - If `osv-scanner` is available, scan lockfiles with OSV in addition to npm audit.
    - For unclear packages, inspect registry metadata with `npm view <pkg>@<version> --json`, including publish time against the configured minimum version age.

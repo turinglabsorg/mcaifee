@@ -28,6 +28,7 @@ const DEFAULT_MINIMUM_VERSION_AGE_HOURS: i64 = 168;
 #[derive(Parser, Debug)]
 #[command(
     name = "mcaifee",
+    version,
     about = "Wrap npm/pnpm/yarn/bun installs with a pre-install malware gate, or audit npm package specs and lockfiles directly."
 )]
 struct Args {
@@ -1801,6 +1802,9 @@ fn run(args: Args) -> i32 {
         scopes.push(path.display().to_string());
         if path.exists() {
             analyze_lockfile(path, &mut findings, &allowed_hosts, source_db.as_ref());
+            if args.online {
+                analyze_lockfile_cve_audit(path, &mut findings, args.timeout);
+            }
         } else {
             add_finding(
                 &mut findings,
@@ -1901,6 +1905,9 @@ fn run_report(args: ReportArgs) -> i32 {
         if lockfile.exists() {
             scope.push(lockfile.display().to_string());
             analyze_lockfile(&lockfile, &mut findings, &allowed_hosts, source_db.as_ref());
+            if args.online {
+                analyze_lockfile_cve_audit(&lockfile, &mut findings, args.timeout);
+            }
         }
         lockfile_summaries.push(summarize_lockfile(&lockfile, &allowed_hosts));
     }
@@ -2657,7 +2664,11 @@ fn source_catalog(online: bool, source_db: Option<&SourceDb>) -> Vec<SourceSumma
         SourceSummary {
             name: "npm audit",
             category: "vulnerability",
-            status: "recommended",
+            status: if online {
+                "queried-for-npm-and-pnpm-lockfiles"
+            } else {
+                "available-with-online-report"
+            },
             url: "https://docs.npmjs.com/cli/commands/npm-audit/",
         },
         SourceSummary {
@@ -2797,12 +2808,13 @@ fn source_catalog(online: bool, source_db: Option<&SourceDb>) -> Vec<SourceSumma
 
 fn recommended_next_steps(online: bool, paranoia: bool) -> Vec<String> {
     let mut steps = vec![
-        "Run `npm audit --json` or OSV Scanner against the resolved lockfile.".to_string(),
         "Check OpenSSF malicious-packages and GitHub malware advisories for confirmed package reports.".to_string(),
         "Review lifecycle scripts, tarball source, integrity, maintainers, publish time, and provenance before approving install scripts.".to_string(),
     ];
     if !online {
-        steps.push("Re-run `mcaifee report --online` when network access is allowed for npm registry metadata.".to_string());
+        steps.push("Re-run `mcaifee report --online` when network access is allowed for registry metadata and npm/pnpm advisory audit.".to_string());
+    } else {
+        steps.push("Use OSV Scanner as an additional advisory source when a second CVE database is required.".to_string());
     }
     if !paranoia {
         steps.push("Run `mcaifee npm install --paranoia` for a Docker behavior simulation before high-risk installs.".to_string());
@@ -3579,6 +3591,350 @@ fn analyze_lockfile_v1_dependencies(
                 source_db,
             );
         }
+    }
+}
+
+fn analyze_lockfile_cve_audit(path: &Path, findings: &mut Vec<Finding>, timeout: u64) {
+    let Some(audit) = audit_command_for_lockfile(path) else {
+        add_finding(
+            findings,
+            Severity::Info,
+            path.display().to_string(),
+            "cve_audit_unsupported_lockfile",
+            "No built-in package-manager CVE audit is configured for this lockfile type.",
+            None,
+        );
+        return;
+    };
+    let output = match run_audit_command(path, audit, timeout) {
+        Ok(output) => output,
+        Err(error) => {
+            add_finding(
+                findings,
+                Severity::Medium,
+                path.display().to_string(),
+                "cve_audit_failed",
+                "Package-manager CVE audit could not be executed.",
+                Some(error),
+            );
+            return;
+        }
+    };
+    if output.stdout.trim().is_empty() {
+        add_finding(
+            findings,
+            Severity::Medium,
+            path.display().to_string(),
+            "cve_audit_failed",
+            "Package-manager CVE audit returned no JSON output.",
+            Some(trimmed_command_output(&output.stderr)),
+        );
+        return;
+    }
+    let parsed = match serde_json::from_str::<Value>(&output.stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            add_finding(
+                findings,
+                Severity::Medium,
+                path.display().to_string(),
+                "cve_audit_invalid_json",
+                "Package-manager CVE audit returned invalid JSON.",
+                Some(format!(
+                    "{error}; stderr={}",
+                    trimmed_command_output(&output.stderr)
+                )),
+            );
+            return;
+        }
+    };
+    if let Some(error) = audit_json_error_message(&parsed) {
+        add_finding(
+            findings,
+            Severity::Medium,
+            path.display().to_string(),
+            "cve_audit_failed",
+            "Package-manager CVE audit returned an error response.",
+            Some(error),
+        );
+        return;
+    }
+    match audit {
+        CveAuditCommand::Npm => add_npm_audit_findings(path, &parsed, findings),
+        CveAuditCommand::Pnpm => add_pnpm_audit_findings(path, &parsed, findings),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CveAuditCommand {
+    Npm,
+    Pnpm,
+}
+
+#[derive(Debug)]
+struct AuditCommandOutput {
+    stdout: String,
+    stderr: String,
+}
+
+fn audit_command_for_lockfile(path: &Path) -> Option<CveAuditCommand> {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some("package-lock.json") | Some("npm-shrinkwrap.json") => Some(CveAuditCommand::Npm),
+        Some("pnpm-lock.yaml") | Some("pnpm-lock.yml") => Some(CveAuditCommand::Pnpm),
+        _ => None,
+    }
+}
+
+fn run_audit_command(
+    path: &Path,
+    audit: CveAuditCommand,
+    _timeout: u64,
+) -> Result<AuditCommandOutput, String> {
+    let mut command = match audit {
+        CveAuditCommand::Npm => {
+            let mut command = Command::new("npm");
+            command.args(["audit", "--json", "--package-lock-only"]);
+            apply_npm_internal_env(&mut command);
+            command
+                .env("NPM_CONFIG_AUDIT", "true")
+                .env("npm_config_audit", "true");
+            command
+        }
+        CveAuditCommand::Pnpm => {
+            let mut command = Command::new("pnpm");
+            command.args(["audit", "--json"]);
+            command
+        }
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        command.current_dir(parent);
+    }
+    command.env("NO_COLOR", "1");
+    let output = command
+        .output()
+        .map_err(|error| format!("audit command failed to start: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if stdout.trim().is_empty() && !output.status.success() {
+        return Err(trimmed_command_output(&stderr));
+    }
+    Ok(AuditCommandOutput { stdout, stderr })
+}
+
+fn add_npm_audit_findings(path: &Path, audit: &Value, findings: &mut Vec<Finding>) {
+    let Some(vulnerabilities) = audit.get("vulnerabilities").and_then(Value::as_object) else {
+        return;
+    };
+    for (name, vulnerability) in vulnerabilities {
+        let parent_severity = vulnerability
+            .get("severity")
+            .and_then(Value::as_str)
+            .and_then(parse_severity)
+            .unwrap_or(Severity::Medium);
+        let target = format!("{}:{name}", path.display());
+        let advisories = vulnerability
+            .get("via")
+            .and_then(Value::as_array)
+            .map(|via| {
+                via.iter()
+                    .filter_map(Value::as_object)
+                    .collect::<Vec<&serde_json::Map<String, Value>>>()
+            })
+            .unwrap_or_default();
+        if advisories.is_empty() {
+            let via = vulnerability
+                .get("via")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|value| !value.is_empty());
+            add_finding(
+                findings,
+                parent_severity,
+                target,
+                "cve_advisory",
+                "npm audit reports a vulnerable dependency chain.",
+                audit_evidence([
+                    Some(format!(
+                        "range={}",
+                        vulnerability
+                            .get("range")
+                            .and_then(Value::as_str)
+                            .unwrap_or("<unknown>")
+                    )),
+                    via.map(|via| format!("via={via}")),
+                    fix_available_evidence(vulnerability.get("fixAvailable")),
+                ]),
+            );
+            continue;
+        }
+        for advisory in advisories {
+            let severity = advisory
+                .get("severity")
+                .and_then(Value::as_str)
+                .and_then(parse_severity)
+                .unwrap_or(parent_severity);
+            let title = advisory
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("npm audit advisory");
+            add_finding(
+                findings,
+                severity,
+                target.clone(),
+                "cve_advisory",
+                title,
+                audit_evidence([
+                    advisory
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(|url| format!("url={url}")),
+                    advisory
+                        .get("range")
+                        .and_then(Value::as_str)
+                        .map(|range| format!("range={range}")),
+                    advisory
+                        .get("source")
+                        .map(|source| format!("source={}", value_to_evidence(source))),
+                    fix_available_evidence(vulnerability.get("fixAvailable")),
+                ]),
+            );
+        }
+    }
+}
+
+fn add_pnpm_audit_findings(path: &Path, audit: &Value, findings: &mut Vec<Finding>) {
+    let Some(advisories) = audit.get("advisories").and_then(Value::as_object) else {
+        return;
+    };
+    for advisory in advisories.values().filter_map(Value::as_object) {
+        let package = advisory
+            .get("module_name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let severity = advisory
+            .get("severity")
+            .and_then(Value::as_str)
+            .and_then(parse_severity)
+            .unwrap_or(Severity::Medium);
+        let title = advisory
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("pnpm audit advisory");
+        add_finding(
+            findings,
+            severity,
+            format!("{}:{package}", path.display()),
+            "cve_advisory",
+            title,
+            audit_evidence([
+                advisory
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(|url| format!("url={url}")),
+                advisory
+                    .get("vulnerable_versions")
+                    .and_then(Value::as_str)
+                    .map(|range| format!("range={range}")),
+                advisory
+                    .get("patched_versions")
+                    .and_then(Value::as_str)
+                    .map(|patched| format!("patched={patched}")),
+                advisory
+                    .get("cves")
+                    .and_then(join_string_array)
+                    .map(|cves| format!("cves={cves}")),
+                advisory
+                    .get("recommendation")
+                    .and_then(Value::as_str)
+                    .map(|recommendation| format!("recommendation={recommendation}")),
+            ]),
+        );
+    }
+}
+
+fn join_string_array(value: &Value) -> Option<String> {
+    let joined = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn fix_available_evidence(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(enabled) = value.as_bool() {
+        return Some(format!("fixAvailable={enabled}"));
+    }
+    if let Some(root) = value.as_object() {
+        let name = root
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let version = root
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let major = root
+            .get("isSemVerMajor")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        return Some(format!("fixAvailable={name}@{version} semverMajor={major}"));
+    }
+    Some(format!("fixAvailable={}", value_to_evidence(value)))
+}
+
+fn audit_json_error_message(audit: &Value) -> Option<String> {
+    let error = audit.get("error")?;
+    let mut parts = Vec::new();
+    if let Some(message) = audit.get("message").and_then(Value::as_str) {
+        parts.push(format!("message={message}"));
+    }
+    if let Some(summary) = error.get("summary").and_then(Value::as_str) {
+        if !summary.is_empty() {
+            parts.push(format!("summary={summary}"));
+        }
+    }
+    if let Some(detail) = error.get("detail").and_then(Value::as_str) {
+        if !detail.is_empty() {
+            parts.push(format!("detail={detail}"));
+        }
+    }
+    if parts.is_empty() {
+        Some(format!("error={}", value_to_evidence(error)))
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn audit_evidence<const N: usize>(parts: [Option<String>; N]) -> Option<String> {
+    let evidence = parts
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!evidence.is_empty()).then_some(evidence)
+}
+
+fn trimmed_command_output(output: &str) -> String {
+    let output = output.trim();
+    if output.len() > 500 {
+        format!("{}...", output.chars().take(500).collect::<String>())
+    } else if output.is_empty() {
+        "<empty>".to_string()
+    } else {
+        output.to_string()
     }
 }
 
@@ -4652,5 +5008,103 @@ packages:
         assert!(findings
             .iter()
             .any(|finding| finding.code == "binary_bun_lockfile"));
+    }
+
+    #[test]
+    fn parses_npm_audit_advisories_as_findings() {
+        let audit = serde_json::json!({
+            "vulnerabilities": {
+                "axios": {
+                    "name": "axios",
+                    "severity": "high",
+                    "isDirect": true,
+                    "range": ">=1.0.0 <1.8.2",
+                    "fixAvailable": true,
+                    "via": [{
+                        "source": 1111035,
+                        "name": "axios",
+                        "title": "axios Requests Vulnerable To Possible SSRF",
+                        "url": "https://github.com/advisories/GHSA-jr5f-v2jv-69x6",
+                        "severity": "high",
+                        "range": ">=1.0.0 <1.8.2"
+                    }]
+                }
+            }
+        });
+        let mut findings = Vec::new();
+
+        add_npm_audit_findings(Path::new("package-lock.json"), &audit, &mut findings);
+
+        assert!(findings.iter().any(|finding| {
+            finding.code == "cve_advisory"
+                && finding.severity == Severity::High
+                && finding.target == "package-lock.json:axios"
+                && finding.message.contains("SSRF")
+                && finding
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|evidence| evidence.contains("GHSA-jr5f-v2jv-69x6"))
+        }));
+    }
+
+    #[test]
+    fn parses_pnpm_audit_advisories_as_findings() {
+        let audit = serde_json::json!({
+            "advisories": {
+                "1118997": {
+                    "module_name": "mongoose",
+                    "severity": "high",
+                    "title": "Mongoose sanitizeFilter bypass",
+                    "url": "https://github.com/advisories/GHSA-wpg9-53fq-2r8h",
+                    "vulnerable_versions": ">=8.0.0 <=8.22.0",
+                    "patched_versions": ">=8.22.1",
+                    "recommendation": "Upgrade to version 8.22.1 or later",
+                    "cves": ["CVE-2026-42334"]
+                }
+            }
+        });
+        let mut findings = Vec::new();
+
+        add_pnpm_audit_findings(Path::new("pnpm-lock.yaml"), &audit, &mut findings);
+
+        assert!(findings.iter().any(|finding| {
+            finding.code == "cve_advisory"
+                && finding.severity == Severity::High
+                && finding.target == "pnpm-lock.yaml:mongoose"
+                && finding.message == "Mongoose sanitizeFilter bypass"
+                && finding
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|evidence| evidence.contains("CVE-2026-42334"))
+        }));
+    }
+
+    #[test]
+    fn cve_audit_command_matches_supported_lockfiles() {
+        assert!(matches!(
+            audit_command_for_lockfile(Path::new("package-lock.json")),
+            Some(CveAuditCommand::Npm)
+        ));
+        assert!(matches!(
+            audit_command_for_lockfile(Path::new("pnpm-lock.yaml")),
+            Some(CveAuditCommand::Pnpm)
+        ));
+        assert!(audit_command_for_lockfile(Path::new("bun.lock")).is_none());
+    }
+
+    #[test]
+    fn reports_package_manager_audit_error_json() {
+        let audit = serde_json::json!({
+            "message": "request to https://registry.npmjs.org failed",
+            "error": {
+                "summary": "audit endpoint returned an error",
+                "detail": ""
+            }
+        });
+
+        let error = audit_json_error_message(&audit).unwrap();
+
+        assert!(error.contains("registry.npmjs.org"));
+        assert!(error.contains("audit endpoint returned an error"));
     }
 }

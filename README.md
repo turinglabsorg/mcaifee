@@ -20,6 +20,7 @@ The repository includes a portable `SKILL.md` entrypoint for any agent runtime t
 - Audits `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and legacy `bun.lockb` signals.
 - Flags lifecycle install scripts, suspicious script content, local specs, Git/SSH specs, HTTP tarballs, missing integrity hashes, broad version ranges, Node core-module shadowing, and likely typosquats.
 - Uses `npm view` in `--online` mode to inspect registry metadata without running package code.
+- Runs npm/pnpm advisory audit in `--online` mode for supported lockfiles and emits CVE/GHSA findings.
 - Flags package versions that are newer than the configured minimum age, 7 days by default.
 - Matches resolved packages against a local source database built from OSV-style malicious package records through `mcaifee db update`.
 - Prints full text or JSON reports through `report` and `audit`.
@@ -38,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.4.0
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
@@ -178,10 +179,11 @@ Scan a manifest and lockfile:
 mcaifee scan --package-json package.json --lockfile package-lock.json
 ```
 
-Use registry metadata when network access is allowed:
+Use registry metadata and package-manager advisory audit when network access is allowed:
 
 ```bash
 mcaifee scan left-pad --online
+mcaifee report --online
 ```
 
 Fail with exit code `2` at or above a threshold:
@@ -228,6 +230,7 @@ Reports include:
 - Highest risk level and severity counts.
 - Manifest dependency counts and lifecycle scripts.
 - Lockfile package counts, install-script counts, and non-registry sources.
+- npm/pnpm advisory findings from `--online` reports when supported lockfiles are present.
 - Findings with severity, target, code, message, and evidence.
 - Source catalog for npm, OSV, OpenSSF, GitHub, GitLab, deps.dev, Socket.dev, Snyk, Sonatype, CISA KEV, and NVD.
 - Recommended next steps.
@@ -274,12 +277,13 @@ Mcaifee currently checks:
 - Dependency specs: local paths, workspace/file specs, Git/SSH specs, HTTP specs, and broad ranges when `--strict-ranges` is enabled.
 - Lockfiles: transitive package names, install/build-script flags, tarball source hostnames, missing integrity/checksum signals, duplicate version fanout, and non-registry sources across npm, pnpm, Yarn, and Bun lockfiles.
 - Registry metadata in `--online` mode: deprecation, maintainers, package binaries, missing repository/license fields, large dependency fanout, new packages, and package versions newer than the configured minimum age.
+- Advisory audit in `--online` mode: `npm audit --json --package-lock-only` for npm lockfiles and `pnpm audit --json` for pnpm lockfiles, normalized into `cve_advisory` findings.
 
 ## Data Sources
 
-The current binary performs local checks, lockfile analysis, local source database matching, optional npm registry metadata checks, and optional Docker behavior checks. The report catalog names external feeds that should be used as corroborating evidence when reviewing npm risk:
+The current binary performs local checks, lockfile analysis, local source database matching, optional npm registry metadata checks, npm/pnpm advisory audit checks, and optional Docker behavior checks. The report catalog names external feeds that should be used as corroborating evidence when reviewing npm risk:
 
-- npm audit advisory data
+- npm audit advisory data, queried for npm/pnpm lockfiles in `--online` mode
 - OSV.dev
 - OpenSSF malicious-packages
 - GitHub Advisory Database
@@ -346,7 +350,8 @@ docker build -f Dockerfile.malicious-test .
 ## Limits
 
 - npm, pnpm, Yarn, and Bun text lockfiles are parsed for transitive package names, source URLs, integrity/checksum signals, and build-script flags when the lockfile format exposes them. npm lockfiles currently have the richest metadata coverage.
+- `--online` advisory audit currently supports npm `package-lock.json` / `npm-shrinkwrap.json` and `pnpm-lock.yaml`; Yarn and Bun lockfiles still rely on static lockfile analysis plus local source database matching.
 - `bun.lockb` is a legacy binary lockfile; Mcaifee detects it and requires migration to text `bun.lock` or generation of a Yarn-compatible lockfile for complete static review.
-- `mcaifee db update` imports OSV-style npm records, with OpenSSF malicious-packages as the default source. Other external advisory feeds are cataloged for review and corroboration; most are not queried directly by the binary yet.
+- `mcaifee db update` imports OSV-style npm records, with OpenSSF malicious-packages as the default source. Other external advisory feeds are cataloged for review and corroboration; OSV direct API coverage is still a future integration.
 - Paranoia mode depends on Docker availability.
 - Network-disabled paranoia mode can fail installs that need live registry access.

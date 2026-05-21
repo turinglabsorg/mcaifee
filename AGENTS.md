@@ -9,7 +9,7 @@
 - User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
 - The default publish-age policy flags package versions newer than 7 days; override with `minimumVersionAgeHours`, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or `--mcaifee-min-version-age-hours`.
 - Wrapper mode auto-updates the default source database before gated installs when it is missing or older than 24 hours; set `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned tests.
-- `--online` uses `npm view` for registry metadata without executing package code.
+- `--online` uses `npm view` for registry metadata and npm/pnpm advisory audit for supported lockfiles without executing package code.
 - `--fail-on <severity>` exits with status `2` when findings meet or exceed the configured threshold.
 - Wrapper mode supports `mcaifee npm ...`, `mcaifee pnpm ...`, `mcaifee yarn ...`, and `mcaifee bun ...`.
 - Internal npm staging and npm registry metadata calls use an isolated temporary npm cache/log directory so user `~/.npm` permission problems do not affect the gate.
@@ -20,7 +20,7 @@
 
 ## Data Sources
 
-- Current checks are local heuristics, local source database matches, npm registry metadata via `npm view`, lockfile/package.json analysis, transitive npm/pnpm/Yarn/Bun lockfile signals, and optional Docker behavior analysis.
+- Current checks are local heuristics, local source database matches, npm registry metadata via `npm view`, npm/pnpm advisory audit for supported lockfiles, lockfile/package.json analysis, transitive npm/pnpm/Yarn/Bun lockfile signals, and optional Docker behavior analysis.
 - Recommended advisory sources for review, corroboration, and direct feed integrations are OSV.dev, npm audit registry advisory endpoints, OpenSSF `ossf/malicious-packages`, GitHub Advisory Database, GitLab Advisory Database, deps.dev, Socket.dev, Snyk, Sonatype OSS Index, CISA KEV, NVD, and vendor threat-intel feeds listed in `references/npm-security-sources.md`.
 
 ## Distribution
