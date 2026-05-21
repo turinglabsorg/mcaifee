@@ -13,6 +13,7 @@ The repository includes a portable `SKILL.md` entrypoint for any agent runtime t
 - Audits `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and legacy `bun.lockb` signals.
 - Flags lifecycle install scripts, suspicious script content, local specs, Git/SSH specs, HTTP tarballs, missing integrity hashes, broad version ranges, Node core-module shadowing, and likely typosquats.
 - Uses `npm view` in `--online` mode to inspect registry metadata without running package code.
+- Flags package versions that are newer than the configured minimum age, 7 days by default.
 - Matches resolved packages against a local source database built from OSV-style malicious package records through `mcaifee db update`.
 - Prints full text or JSON reports through `report` and `audit`.
 - Can run a Docker behavior simulation in paranoia mode with network disabled by default.
@@ -55,6 +56,39 @@ Build from source:
 cargo build --release --locked
 ./target/release/mcaifee --help
 ```
+
+## Configuration
+
+Mcaifee stores user policy in `~/.mcaifee/config.json` and cache data in `~/.mcaifee/cache/`.
+
+Create or inspect the default config:
+
+```bash
+mcaifee config init
+mcaifee config status
+```
+
+Default config:
+
+```json
+{
+  "minimumVersionAgeHours": 168,
+  "sourceDbMaxAgeHours": 24,
+  "failOn": "medium",
+  "autoUpdateSourceDb": true,
+  "cacheDir": "~/.mcaifee/cache",
+  "sourceDbPath": null
+}
+```
+
+Policy precedence is command flag, environment variable, config file, then built-in default. The minimum package version age can be overridden per command:
+
+```bash
+mcaifee scan react@18.2.0 --online --min-version-age-hours 72
+mcaifee npm install react --mcaifee-min-version-age-hours 72
+```
+
+Set `minimumVersionAgeHours` to `0`, or pass `--min-version-age-hours 0`, to disable the publish-age gate for that scope.
 
 ## Wrapper Usage
 
@@ -169,6 +203,8 @@ The scanner matches exact package versions from lockfiles against this database 
 
 Package-manager wrappers automatically refresh the default source database before gated installs when the database is missing or older than 24 hours. Set `MCAIFEE_DB_AUTO_UPDATE=0` to disable this in offline or fully pinned environments. Set `MCAIFEE_DB_PATH=/path/to/source-db.json` to use a specific cache file.
 
+By default the source database lives at `~/.mcaifee/cache/source-db.json`. Override `cacheDir` or `sourceDbPath` in `~/.mcaifee/config.json`, or set `MCAIFEE_CACHE_DIR` / `MCAIFEE_DB_PATH`.
+
 ## Report And Audit
 
 `audit` is an alias of `report`.
@@ -230,7 +266,7 @@ Mcaifee currently checks:
 - Package names: Node core-module shadowing and typosquat distance from common packages.
 - Dependency specs: local paths, workspace/file specs, Git/SSH specs, HTTP specs, and broad ranges when `--strict-ranges` is enabled.
 - Lockfiles: transitive package names, install/build-script flags, tarball source hostnames, missing integrity/checksum signals, duplicate version fanout, and non-registry sources across npm, pnpm, Yarn, and Bun lockfiles.
-- Registry metadata in `--online` mode: deprecation, maintainers, package binaries, missing repository/license fields, large dependency fanout, new packages, and recent publishes.
+- Registry metadata in `--online` mode: deprecation, maintainers, package binaries, missing repository/license fields, large dependency fanout, new packages, and package versions newer than the configured minimum age.
 
 ## Data Sources
 

@@ -22,7 +22,8 @@ const MCAIFEE_ASCII: &str = r#"
           npm / pnpm / yarn / bun gate
 "#;
 
-const SOURCE_DB_MAX_AGE_HOURS: i64 = 24;
+const DEFAULT_SOURCE_DB_MAX_AGE_HOURS: i64 = 24;
+const DEFAULT_MINIMUM_VERSION_AGE_HOURS: i64 = 168;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -68,6 +69,13 @@ struct Args {
         help = "Timeout in seconds for each npm view call"
     )]
     timeout: u64,
+
+    #[arg(
+        long = "min-version-age-hours",
+        value_name = "HOURS",
+        help = "Override the configured minimum package version age; 0 disables the publish-age gate"
+    )]
+    min_version_age_hours: Option<i64>,
 }
 
 #[derive(Parser, Debug)]
@@ -107,6 +115,13 @@ struct ReportArgs {
         help = "Timeout in seconds for each npm view call"
     )]
     timeout: u64,
+
+    #[arg(
+        long = "min-version-age-hours",
+        value_name = "HOURS",
+        help = "Override the configured minimum package version age; 0 disables the publish-age gate"
+    )]
+    min_version_age_hours: Option<i64>,
 }
 
 #[derive(Parser, Debug)]
@@ -148,6 +163,33 @@ struct DbUpdateArgs {
 struct DbStatusArgs {
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    Init(ConfigInitArgs),
+    Status(ConfigStatusArgs),
+}
+
+#[derive(Parser, Debug)]
+struct ConfigInitArgs {
+    #[arg(long, value_name = "PATH")]
+    path: Option<PathBuf>,
+
+    #[arg(long, help = "Overwrite an existing config file")]
+    force: bool,
+}
+
+#[derive(Parser, Debug)]
+struct ConfigStatusArgs {
+    #[arg(long, value_name = "PATH")]
+    path: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -293,6 +335,22 @@ struct SourceDbRecord {
     confidence: String,
     summary: String,
     aliases: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserConfig {
+    minimum_version_age_hours: Option<i64>,
+    source_db_max_age_hours: Option<i64>,
+    fail_on: Option<Severity>,
+    auto_update_source_db: Option<bool>,
+    cache_dir: Option<PathBuf>,
+    source_db_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Policy {
+    minimum_version_age_hours: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -502,6 +560,10 @@ fn main() {
             let mut db_args = vec!["mcaifee db".to_string()];
             db_args.extend(raw_args.into_iter().skip(1));
             run_db(DbArgs::parse_from(db_args))
+        } else if raw_args.first().is_some_and(|arg| arg == "config") {
+            let mut config_args = vec!["mcaifee config".to_string()];
+            config_args.extend(raw_args.into_iter().skip(1));
+            run_config(ConfigArgs::parse_from(config_args))
         } else if raw_args
             .first()
             .is_some_and(|arg| arg == "report" || arg == "audit")
@@ -613,6 +675,80 @@ fn run_db(args: DbArgs) -> i32 {
     }
 }
 
+fn run_config(args: ConfigArgs) -> i32 {
+    match args.command {
+        ConfigCommand::Init(init_args) => run_config_init(init_args),
+        ConfigCommand::Status(status_args) => run_config_status(status_args),
+    }
+}
+
+fn run_config_init(args: ConfigInitArgs) -> i32 {
+    let config_path = args.path.unwrap_or_else(default_config_path);
+    if config_path.exists() && !args.force {
+        eprintln!(
+            "mcaifee: config already exists at {}; pass --force to overwrite",
+            config_path.display()
+        );
+        return 1;
+    }
+    if let Some(parent) = config_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!("mcaifee: could not create {}: {error}", parent.display());
+            return 1;
+        }
+    }
+    let config = default_config_file();
+    let encoded = match serde_json::to_vec_pretty(&config) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            eprintln!("mcaifee: could not serialize config: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = fs::write(&config_path, encoded) {
+        eprintln!(
+            "mcaifee: could not write {}: {error}",
+            config_path.display()
+        );
+        return 1;
+    }
+    println!("mcaifee config init");
+    println!("config: {}", config_path.display());
+    0
+}
+
+fn run_config_status(args: ConfigStatusArgs) -> i32 {
+    let config_path = args.path.unwrap_or_else(default_config_path);
+    println!("mcaifee config status");
+    println!("config: {}", config_path.display());
+    println!("exists: {}", config_path.exists());
+
+    let config = read_config_file(&config_path).unwrap_or_default();
+    let policy = effective_policy_with_config(&config, None);
+    println!(
+        "minimumVersionAgeHours: {}",
+        policy.minimum_version_age_hours
+    );
+    println!("failOn: {}", fail_threshold_with_config(&config).as_str());
+    println!(
+        "autoUpdateSourceDb: {}",
+        auto_update_source_db_enabled_with_config(&config)
+    );
+    println!(
+        "sourceDbMaxAgeHours: {}",
+        source_db_max_age_hours_with_config(&config)
+    );
+    println!(
+        "cacheDir: {}",
+        default_cache_dir_with_config(&config).display()
+    );
+    println!(
+        "sourceDbPath: {}",
+        default_source_db_path_with_config(&config).display()
+    );
+    0
+}
+
 fn run_db_update(args: DbUpdateArgs) -> i32 {
     let db_path = args.db.unwrap_or_else(default_source_db_path);
     let source_path = if let Some(source) = args.source {
@@ -686,24 +822,15 @@ fn run_db_status(args: DbStatusArgs) -> i32 {
 }
 
 fn auto_update_source_db_if_stale() {
-    if env::var("MCAIFEE_DB_AUTO_UPDATE")
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "0" | "false" | "False" | "FALSE" | "no" | "NO"
-            )
-        })
-        .unwrap_or(false)
-    {
+    if !auto_update_source_db_enabled() {
         return;
     }
     let db_path = default_source_db_path();
-    if !source_db_needs_update(&db_path, Duration::hours(SOURCE_DB_MAX_AGE_HOURS)) {
+    let max_age_hours = source_db_max_age_hours();
+    if !source_db_needs_update(&db_path, Duration::hours(max_age_hours)) {
         return;
     }
-    eprintln!(
-        "mcaifee: source database missing or older than {SOURCE_DB_MAX_AGE_HOURS}h; running db update"
-    );
+    eprintln!("mcaifee: source database missing or older than {max_age_hours}h; running db update");
     let status = run_db_update(DbUpdateArgs {
         source: None,
         db: Some(db_path),
@@ -748,14 +875,16 @@ fn run_package_manager_wrapper(package_manager: &str, package_manager_args: &[St
     let threshold = wrapper_options
         .fail_on
         .unwrap_or_else(wrapper_fail_threshold);
+    let policy = effective_policy(wrapper_options.min_version_age_hours);
     let gate_result = if package_manager == "npm" {
-        gate_npm_command(&package_manager_args, threshold, &wrapper_options)
+        gate_npm_command(&package_manager_args, threshold, &wrapper_options, &policy)
     } else {
         gate_generic_package_manager_command(
             package_manager,
             &package_manager_args,
             threshold,
             &wrapper_options,
+            &policy,
         )
     };
 
@@ -772,6 +901,7 @@ fn run_package_manager_wrapper(package_manager: &str, package_manager_args: &[St
 struct WrapperOptions {
     paranoia: bool,
     fail_on: Option<Severity>,
+    min_version_age_hours: Option<i64>,
 }
 
 fn parse_wrapper_options(package_manager_args: &[String]) -> (WrapperOptions, Vec<String>) {
@@ -787,6 +917,13 @@ fn parse_wrapper_options(package_manager_args: &[String]) -> (WrapperOptions, Ve
         } else if arg == "--mcaifee-fail-on" {
             if let Some(value) = package_manager_args.get(index + 1) {
                 options.fail_on = parse_severity(value);
+                index += 1;
+            }
+        } else if let Some(value) = arg.strip_prefix("--mcaifee-min-version-age-hours=") {
+            options.min_version_age_hours = value.parse::<i64>().ok();
+        } else if arg == "--mcaifee-min-version-age-hours" {
+            if let Some(value) = package_manager_args.get(index + 1) {
+                options.min_version_age_hours = value.parse::<i64>().ok();
                 index += 1;
             }
         } else {
@@ -843,10 +980,66 @@ fn find_command_index(package_manager_args: &[String]) -> Option<usize> {
 }
 
 fn wrapper_fail_threshold() -> Severity {
+    fail_threshold_with_config(&load_user_config())
+}
+
+fn fail_threshold_with_config(config: &UserConfig) -> Severity {
     env::var("MCAIFEE_FAIL_ON")
         .ok()
         .and_then(|value| parse_severity(&value))
+        .or(config.fail_on)
         .unwrap_or(Severity::Medium)
+}
+
+fn effective_policy(min_version_age_hours_override: Option<i64>) -> Policy {
+    effective_policy_with_config(&load_user_config(), min_version_age_hours_override)
+}
+
+fn effective_policy_with_config(
+    config: &UserConfig,
+    min_version_age_hours_override: Option<i64>,
+) -> Policy {
+    let minimum_version_age_hours = min_version_age_hours_override
+        .or_else(|| {
+            env::var("MCAIFEE_MIN_VERSION_AGE_HOURS")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .or(config.minimum_version_age_hours)
+        .unwrap_or(DEFAULT_MINIMUM_VERSION_AGE_HOURS)
+        .max(0);
+
+    Policy {
+        minimum_version_age_hours,
+    }
+}
+
+fn source_db_max_age_hours() -> i64 {
+    source_db_max_age_hours_with_config(&load_user_config())
+}
+
+fn source_db_max_age_hours_with_config(config: &UserConfig) -> i64 {
+    env::var("MCAIFEE_SOURCE_DB_MAX_AGE_HOURS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or(config.source_db_max_age_hours)
+        .unwrap_or(DEFAULT_SOURCE_DB_MAX_AGE_HOURS)
+        .max(1)
+}
+
+fn auto_update_source_db_enabled() -> bool {
+    auto_update_source_db_enabled_with_config(&load_user_config())
+}
+
+fn auto_update_source_db_enabled_with_config(config: &UserConfig) -> bool {
+    env::var("MCAIFEE_DB_AUTO_UPDATE")
+        .map(|value| {
+            !matches!(
+                value.as_str(),
+                "0" | "false" | "False" | "FALSE" | "no" | "NO"
+            )
+        })
+        .unwrap_or_else(|_| config.auto_update_source_db.unwrap_or(true))
 }
 
 fn parse_severity(value: &str) -> Option<Severity> {
@@ -864,6 +1057,7 @@ fn gate_npm_command(
     package_manager_args: &[String],
     threshold: Severity,
     wrapper_options: &WrapperOptions,
+    policy: &Policy,
 ) -> Result<(), i32> {
     let snapshots = match snapshot_project_files() {
         Ok(snapshots) => snapshots,
@@ -887,7 +1081,7 @@ fn gate_npm_command(
         }
     }
 
-    let findings = collect_project_and_spec_findings("npm", package_manager_args, true);
+    let findings = collect_project_and_spec_findings("npm", package_manager_args, true, policy);
     print_gate_findings(&findings);
     if has_threshold_findings(&findings, threshold) {
         restore_project_files(&snapshots);
@@ -913,8 +1107,10 @@ fn gate_generic_package_manager_command(
     package_manager_args: &[String],
     threshold: Severity,
     wrapper_options: &WrapperOptions,
+    policy: &Policy,
 ) -> Result<(), i32> {
-    let findings = collect_project_and_spec_findings(package_manager, package_manager_args, true);
+    let findings =
+        collect_project_and_spec_findings(package_manager, package_manager_args, true, policy);
     print_gate_findings(&findings);
     if has_threshold_findings(&findings, threshold) {
         eprintln!(
@@ -994,6 +1190,7 @@ fn collect_project_and_spec_findings(
     package_manager: &str,
     package_manager_args: &[String],
     use_online_registry_metadata: bool,
+    policy: &Policy,
 ) -> Vec<Finding> {
     let allowed_hosts = HashSet::from(["registry.npmjs.org".to_string()]);
     let source_db = load_default_source_db();
@@ -1020,7 +1217,7 @@ fn collect_project_and_spec_findings(
             &mut findings,
         );
         if use_online_registry_metadata && !is_non_registry_spec(&spec) {
-            analyze_online_spec(&spec, &mut findings, &allowed_hosts, 20);
+            analyze_online_spec(&spec, &mut findings, &allowed_hosts, 20, policy);
         } else {
             analyze_package_name(&name, &mut findings, &spec);
             if is_non_registry_spec(&spec) {
@@ -1188,20 +1385,92 @@ fn npm_internal_env() -> NpmInternalEnv {
     }
 }
 
-fn default_cache_dir() -> PathBuf {
-    if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(cache_home).join("mcaifee")
-    } else if let Some(home) = env::var_os("HOME") {
-        PathBuf::from(home).join(".cache").join("mcaifee")
+fn default_mcaifee_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".mcaifee"))
+        .unwrap_or_else(|| env::temp_dir().join("mcaifee"))
+}
+
+fn default_config_path() -> PathBuf {
+    env::var_os("MCAIFEE_CONFIG_PATH")
+        .map(PathBuf::from)
+        .map(|path| expand_home_path(&path))
+        .unwrap_or_else(|| default_mcaifee_dir().join("config.json"))
+}
+
+fn default_config_file() -> UserConfig {
+    UserConfig {
+        minimum_version_age_hours: Some(DEFAULT_MINIMUM_VERSION_AGE_HOURS),
+        source_db_max_age_hours: Some(DEFAULT_SOURCE_DB_MAX_AGE_HOURS),
+        fail_on: Some(Severity::Medium),
+        auto_update_source_db: Some(true),
+        cache_dir: Some(PathBuf::from("~/.mcaifee/cache")),
+        source_db_path: None,
+    }
+}
+
+fn read_config_file(path: &Path) -> io::Result<UserConfig> {
+    let data = fs::read_to_string(path)?;
+    serde_json::from_str(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn load_user_config() -> UserConfig {
+    let path = default_config_path();
+    match read_config_file(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => UserConfig::default(),
+        Err(error) => {
+            eprintln!("mcaifee: could not read {}: {error}", path.display());
+            UserConfig::default()
+        }
+    }
+}
+
+fn expand_home_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return path.to_path_buf();
+    };
+    if value == "~" {
+        home
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        home.join(rest)
     } else {
-        env::temp_dir().join("mcaifee")
+        path.to_path_buf()
+    }
+}
+
+fn default_cache_dir() -> PathBuf {
+    default_cache_dir_with_config(&load_user_config())
+}
+
+fn default_cache_dir_with_config(config: &UserConfig) -> PathBuf {
+    if let Some(cache_dir) = env::var_os("MCAIFEE_CACHE_DIR").map(PathBuf::from) {
+        expand_home_path(&cache_dir)
+    } else if let Some(cache_dir) = &config.cache_dir {
+        expand_home_path(cache_dir)
+    } else {
+        default_mcaifee_dir().join("cache")
     }
 }
 
 fn default_source_db_path() -> PathBuf {
+    let config = load_user_config();
+    default_source_db_path_with_config(&config)
+}
+
+fn default_source_db_path_with_config(config: &UserConfig) -> PathBuf {
     env::var_os("MCAIFEE_DB_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_cache_dir().join("source-db.json"))
+        .map(|path| expand_home_path(&path))
+        .or_else(|| {
+            config
+                .source_db_path
+                .as_ref()
+                .map(|path| expand_home_path(path))
+        })
+        .unwrap_or_else(|| default_cache_dir_with_config(config).join("source-db.json"))
 }
 
 fn default_source_checkout_dir(name: &str) -> PathBuf {
@@ -1502,6 +1771,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn run(args: Args) -> i32 {
+    let policy = effective_policy(args.min_version_age_hours);
     let allowed_hosts: HashSet<String> = args
         .allow_registry_host
         .iter()
@@ -1554,7 +1824,7 @@ fn run(args: Args) -> i32 {
             &mut findings,
         );
         if args.online {
-            analyze_online_spec(spec, &mut findings, &allowed_hosts, args.timeout);
+            analyze_online_spec(spec, &mut findings, &allowed_hosts, args.timeout, &policy);
         } else {
             analyze_package_name(&name, &mut findings, spec);
             if is_non_registry_spec(spec) {
@@ -1603,6 +1873,7 @@ fn run(args: Args) -> i32 {
 }
 
 fn run_report(args: ReportArgs) -> i32 {
+    let policy = effective_policy(args.min_version_age_hours);
     let allowed_hosts: HashSet<String> = args
         .allow_registry_host
         .iter()
@@ -1645,7 +1916,7 @@ fn run_report(args: ReportArgs) -> i32 {
             &mut findings,
         );
         if args.online && !is_non_registry_spec(spec) {
-            analyze_online_spec(spec, &mut findings, &allowed_hosts, args.timeout);
+            analyze_online_spec(spec, &mut findings, &allowed_hosts, args.timeout, &policy);
         } else {
             analyze_package_name(&name, &mut findings, spec);
             if is_non_registry_spec(spec) {
@@ -3343,6 +3614,7 @@ fn analyze_online_spec(
     findings: &mut Vec<Finding>,
     allowed_hosts: &HashSet<String>,
     timeout: u64,
+    policy: &Policy,
 ) {
     let name = package_name_from_spec(spec);
     analyze_package_name(&name, findings, spec);
@@ -3376,7 +3648,14 @@ fn analyze_online_spec(
     };
     let registry_name = root.get("name").and_then(Value::as_str);
     let time_info = registry_name.and_then(|name| run_npm_view_time(name, timeout));
-    analyze_online_manifest(spec, root, time_info.as_ref(), findings, allowed_hosts);
+    analyze_online_manifest(
+        spec,
+        root,
+        time_info.as_ref(),
+        findings,
+        allowed_hosts,
+        policy,
+    );
 }
 
 fn analyze_online_manifest(
@@ -3385,6 +3664,7 @@ fn analyze_online_manifest(
     time_info: Option<&Value>,
     findings: &mut Vec<Finding>,
     allowed_hosts: &HashSet<String>,
+    policy: &Policy,
 ) {
     let target = manifest
         .get("name")
@@ -3497,6 +3777,7 @@ fn analyze_online_manifest(
             manifest.get("version").and_then(Value::as_str),
             time_info,
             findings,
+            policy,
         );
     }
 }
@@ -3512,6 +3793,7 @@ fn analyze_publish_times(
     version: Option<&str>,
     time_info: &Value,
     findings: &mut Vec<Finding>,
+    policy: &Policy,
 ) {
     let Some(time_info) = time_info.as_object() else {
         return;
@@ -3523,25 +3805,34 @@ fn analyze_publish_times(
             .and_then(Value::as_str)
             .and_then(parse_npm_datetime)
         {
+            let min_age_hours = policy.minimum_version_age_hours;
             let age = now - published_at;
-            if age < Duration::days(1) {
-                add_finding(
-                    findings,
-                    Severity::High,
-                    name,
-                    "very_recent_publish",
-                    "Package version was published less than 24 hours ago.",
-                    Some(published_at.to_rfc3339()),
-                );
-            } else if age < Duration::days(7) {
-                add_finding(
-                    findings,
-                    Severity::Medium,
-                    name,
-                    "recent_publish",
-                    "Package version was published less than 7 days ago.",
-                    Some(published_at.to_rfc3339()),
-                );
+            if min_age_hours > 0 && age < Duration::hours(min_age_hours) {
+                let min_age = format_hours(min_age_hours);
+                let evidence = Some(format!(
+                    "publishedAt={} minimumAge={}",
+                    published_at.to_rfc3339(),
+                    min_age
+                ));
+                if age < Duration::days(1) {
+                    add_finding(
+                        findings,
+                        Severity::High,
+                        name,
+                        "very_recent_publish",
+                        format!("Package version is newer than the configured minimum age of {min_age}."),
+                        evidence,
+                    );
+                } else {
+                    add_finding(
+                        findings,
+                        Severity::Medium,
+                        name,
+                        "recent_publish",
+                        format!("Package version is newer than the configured minimum age of {min_age}."),
+                        evidence,
+                    );
+                }
             }
         }
     }
@@ -3560,6 +3851,21 @@ fn analyze_publish_times(
                 Some(created_at.to_rfc3339()),
             );
         }
+    }
+}
+
+fn format_hours(hours: i64) -> String {
+    if hours % 24 == 0 {
+        let days = hours / 24;
+        if days == 1 {
+            "1 day".to_string()
+        } else {
+            format!("{days} days")
+        }
+    } else if hours == 1 {
+        "1 hour".to_string()
+    } else {
+        format!("{hours} hours")
     }
 }
 
@@ -3758,6 +4064,7 @@ mod tests {
             "install".to_string(),
             "--mcaifee-paranoia".to_string(),
             "--mcaifee-fail-on=critical".to_string(),
+            "--mcaifee-min-version-age-hours=72".to_string(),
             "vite".to_string(),
         ];
 
@@ -3765,6 +4072,7 @@ mod tests {
 
         assert!(options.paranoia);
         assert_eq!(options.fail_on, Some(Severity::Critical));
+        assert_eq!(options.min_version_age_hours, Some(72));
         assert_eq!(forwarded, vec!["install".to_string(), "vite".to_string()]);
     }
 
@@ -3991,15 +4299,15 @@ mod tests {
 
         assert!(!source_db_needs_update(
             &fresh_path,
-            Duration::hours(SOURCE_DB_MAX_AGE_HOURS)
+            Duration::hours(DEFAULT_SOURCE_DB_MAX_AGE_HOURS)
         ));
         assert!(source_db_needs_update(
             &stale_path,
-            Duration::hours(SOURCE_DB_MAX_AGE_HOURS)
+            Duration::hours(DEFAULT_SOURCE_DB_MAX_AGE_HOURS)
         ));
         assert!(source_db_needs_update(
             &missing_path,
-            Duration::hours(SOURCE_DB_MAX_AGE_HOURS)
+            Duration::hours(DEFAULT_SOURCE_DB_MAX_AGE_HOURS)
         ));
     }
 
@@ -4010,6 +4318,65 @@ mod tests {
             records: Vec::new(),
         };
         fs::write(path, serde_json::to_vec(&db).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn default_config_uses_mcaifee_home_cache_and_week_age_policy() {
+        let config = default_config_file();
+
+        assert_eq!(
+            config.minimum_version_age_hours,
+            Some(DEFAULT_MINIMUM_VERSION_AGE_HOURS)
+        );
+        assert_eq!(config.cache_dir, Some(PathBuf::from("~/.mcaifee/cache")));
+        assert_eq!(
+            effective_policy_with_config(&config, None).minimum_version_age_hours,
+            168
+        );
+        assert_eq!(
+            effective_policy_with_config(&config, Some(0)).minimum_version_age_hours,
+            0
+        );
+    }
+
+    #[test]
+    fn publish_age_policy_flags_versions_newer_than_minimum_age() {
+        let published_at = Utc::now() - Duration::days(2);
+        let created_at = Utc::now() - Duration::days(100);
+        let time_info = serde_json::json!({
+            "created": created_at.to_rfc3339(),
+            "1.0.0": published_at.to_rfc3339()
+        });
+        let policy = Policy {
+            minimum_version_age_hours: 168,
+        };
+        let mut findings = Vec::new();
+
+        analyze_publish_times("demo", Some("1.0.0"), &time_info, &mut findings, &policy);
+
+        assert!(findings.iter().any(|finding| {
+            finding.code == "recent_publish" && finding.message.contains("7 days")
+        }));
+    }
+
+    #[test]
+    fn publish_age_policy_can_be_disabled() {
+        let published_at = Utc::now() - Duration::hours(1);
+        let created_at = Utc::now() - Duration::days(100);
+        let time_info = serde_json::json!({
+            "created": created_at.to_rfc3339(),
+            "1.0.0": published_at.to_rfc3339()
+        });
+        let policy = Policy {
+            minimum_version_age_hours: 0,
+        };
+        let mut findings = Vec::new();
+
+        analyze_publish_times("demo", Some("1.0.0"), &time_info, &mut findings, &policy);
+
+        assert!(findings.iter().all(
+            |finding| finding.code != "recent_publish" && finding.code != "very_recent_publish"
+        ));
     }
 
     #[test]

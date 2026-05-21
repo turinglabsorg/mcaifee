@@ -6,6 +6,8 @@
 - It audits npm package specs, `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and legacy `bun.lockb` detection.
 - It flags malware and supply-chain indicators including lifecycle install scripts, local or non-registry sources, HTTP tarballs, missing integrity hashes, Node core-module shadowing, and likely typosquats of common packages.
 - `mcaifee db update` builds a local OSV-style source database, defaulting to OpenSSF `malicious-packages`; scans emit `source_db_match` findings for exact package/version matches.
+- User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
+- The default publish-age policy flags package versions newer than 7 days; override with `minimumVersionAgeHours`, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or `--mcaifee-min-version-age-hours`.
 - Wrapper mode auto-updates the default source database before gated installs when it is missing or older than 24 hours; set `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned tests.
 - `--online` uses `npm view` for registry metadata without executing package code.
 - `--fail-on <severity>` exits with status `2` when findings meet or exceed the configured threshold.

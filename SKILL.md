@@ -58,7 +58,9 @@ mcaifee db update
 mcaifee db status
 ```
 
-The package-manager wrapper automatically runs a source database update before gated installs when the default database is missing or older than 24 hours. Use `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned test environments.
+The package-manager wrapper automatically runs a source database update before gated installs when the default database is missing or older than 24 hours. User policy lives in `~/.mcaifee/config.json`, and cache data lives in `~/.mcaifee/cache/`. Use `mcaifee config init` and `mcaifee config status` to create or inspect policy. Use `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned test environments.
+
+The default minimum package version age is 7 days. Override it with `minimumVersionAgeHours` in config, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or wrapper flag `--mcaifee-min-version-age-hours`. Use `0` only for an explicit bypass of the publish-age gate.
 
 For a complete review artifact:
 
@@ -102,13 +104,13 @@ docker build -f Dockerfile.malicious-test .
    - Run `npm audit --json` in projects that already have a lockfile.
    - Run `npm audit signatures --json --include-attestations` when packages are already downloaded and npm supports registry signatures/provenance for the registry.
    - If `osv-scanner` is available, scan lockfiles with OSV in addition to npm audit.
-   - For unclear packages, inspect registry metadata with `npm view <pkg>@<version> --json`.
+   - For unclear packages, inspect registry metadata with `npm view <pkg>@<version> --json`, including publish time against the configured minimum version age.
    - For tarball inspection, use a disposable directory and `npm pack --ignore-scripts <pkg>@<version>`, then inspect the archive without running code.
 
 3. Triage risk:
    - **Critical**: known malicious package/version, explicit credential exfiltration, destructive lifecycle script, reverse shell behavior, HTTP tarball, or registry/signature/provenance failure for a package that should verify.
    - **High**: suspicious lifecycle script, likely typosquat of a popular package, core-module shadowing (`fs`, `path`, `crypto`, etc.), missing lockfile integrity for registry tarballs, or untrusted non-npm tarball/git source in production dependencies.
-   - **Medium**: install scripts requiring manual review, very recent publish of a new direct dependency, deprecated package, single-maintainer sensitive dependency, non-default registry, or binary downloader.
+   - **Medium**: install scripts requiring manual review, package versions newer than the configured minimum age, deprecated package, single-maintainer sensitive dependency, non-default registry, or binary downloader.
    - **Low**: missing repository/license metadata, broad version range, unusually large dependency fanout, or package with CLI/bin entry that needs extra review.
 
 4. Decide:
