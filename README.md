@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.2.2
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.3.0
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
