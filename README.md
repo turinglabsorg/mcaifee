@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.4.0
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.5.0
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
@@ -227,7 +227,10 @@ mcaifee audit --format json
 
 Reports include:
 
+- Gate decision: `allow`, `needs_manual_review`, or `quarantine`.
 - Highest risk level and severity counts.
+- Grouped finding counts by class and code.
+- Top advisory packages with highest severity, advisory count, fix availability, and sample advisory titles.
 - Manifest dependency counts and lifecycle scripts.
 - Lockfile package counts, install-script counts, and non-registry sources.
 - npm/pnpm advisory findings from `--online` reports when supported lockfiles are present.

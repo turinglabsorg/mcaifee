@@ -14,7 +14,7 @@
 - Wrapper mode supports `mcaifee npm ...`, `mcaifee pnpm ...`, `mcaifee yarn ...`, and `mcaifee bun ...`.
 - Internal npm staging and npm registry metadata calls use an isolated temporary npm cache/log directory so user `~/.npm` permission problems do not affect the gate.
 - Shell integration supports `mcaifee shell-init`, `mcaifee shell-disable`, and `mcaifee shell-status` so plain `npm`, `pnpm`, `yarn`, and `bun` calls can be wrapped in the current shell.
-- Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output.
+- Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, gate decisions, grouped finding summaries, and advisory package rollups.
 - `--paranoia` or `MCAIFEE_PARANOIA=1` runs an extra Docker install simulation with network disabled by default, fake canary credentials, dropped capabilities, and a read-only project mount.
 - Wrapper logs print an ASCII Mcaifee banner before gated package-manager commands.
 

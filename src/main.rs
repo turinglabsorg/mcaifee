@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -256,7 +256,11 @@ impl Severity {
 struct JsonOutput {
     tool: &'static str,
     scope: Vec<String>,
+    decision: GateDecision,
+    decision_reason: String,
     highest_risk: String,
+    summary: BTreeMap<String, usize>,
+    finding_groups: Vec<FindingGroup>,
     findings: Vec<Finding>,
 }
 
@@ -266,8 +270,12 @@ struct ReportOutput {
     tool: &'static str,
     mode: &'static str,
     scope: Vec<String>,
+    decision: GateDecision,
+    decision_reason: String,
     highest_risk: String,
-    summary: HashMap<String, usize>,
+    summary: BTreeMap<String, usize>,
+    finding_groups: Vec<FindingGroup>,
+    advisory_packages: Vec<AdvisoryPackageSummary>,
     package_json: Option<ManifestSummary>,
     lockfiles: Vec<LockfileSummary>,
     package_specs: Vec<String>,
@@ -313,6 +321,44 @@ struct ParanoiaSummary {
     image: String,
     network: String,
     note: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GateDecision {
+    Allow,
+    NeedsManualReview,
+    Quarantine,
+}
+
+impl GateDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            GateDecision::Allow => "allow",
+            GateDecision::NeedsManualReview => "needs_manual_review",
+            GateDecision::Quarantine => "quarantine",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FindingGroup {
+    code: String,
+    category: &'static str,
+    highest_risk: String,
+    count: usize,
+    summary: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvisoryPackageSummary {
+    package: String,
+    highest_risk: String,
+    advisory_count: usize,
+    fix_available: Option<String>,
+    sample_advisories: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1848,13 +1894,18 @@ fn run(args: Args) -> i32 {
             }
         }
     }
+    dedupe_findings(&mut findings);
 
     match args.format {
         OutputFormat::Json => {
             let output = JsonOutput {
                 tool: "mcaifee",
                 scope: scopes.clone(),
+                decision: gate_decision(&findings),
+                decision_reason: decision_reason(&findings),
                 highest_risk: highest_severity(&findings),
+                summary: severity_counts(&findings),
+                finding_groups: finding_groups(&findings),
                 findings: findings.clone(),
             };
             println!(
@@ -1943,12 +1994,18 @@ fn run_report(args: ReportArgs) -> i32 {
         }
     }
 
+    dedupe_findings(&mut findings);
+    let decision = gate_decision(&findings);
     let report = ReportOutput {
         tool: "mcaifee",
         mode: "report",
         scope,
+        decision,
+        decision_reason: decision_reason(&findings),
         highest_risk: highest_severity(&findings),
         summary: severity_counts(&findings),
+        finding_groups: finding_groups(&findings),
+        advisory_packages: advisory_package_summaries(&findings),
         package_json: package_json_summary,
         lockfiles: lockfile_summaries,
         package_specs: args.targets,
@@ -2822,8 +2879,72 @@ fn recommended_next_steps(online: bool, paranoia: bool) -> Vec<String> {
     steps
 }
 
-fn severity_counts(findings: &[Finding]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
+fn dedupe_findings(findings: &mut Vec<Finding>) {
+    let mut seen = HashSet::new();
+    findings.retain(|finding| {
+        seen.insert((
+            finding.severity.score(),
+            finding.target.clone(),
+            finding.code.clone(),
+            finding.message.clone(),
+            finding.evidence.clone(),
+        ))
+    });
+}
+
+fn gate_decision(findings: &[Finding]) -> GateDecision {
+    match findings
+        .iter()
+        .map(|finding| finding.severity.score())
+        .max()
+        .unwrap_or(0)
+    {
+        3.. => GateDecision::Quarantine,
+        2 => GateDecision::NeedsManualReview,
+        _ => GateDecision::Allow,
+    }
+}
+
+fn decision_reason(findings: &[Finding]) -> String {
+    let mut sorted = findings.to_vec();
+    sorted.sort_by_key(finding_sort_key);
+    match gate_decision(findings) {
+        GateDecision::Quarantine => sorted
+            .first()
+            .map(|finding| {
+                format!(
+                    "{} finding `{}` on `{}` blocks install or merge until resolved.",
+                    finding.severity.as_str(),
+                    finding.code,
+                    finding.target
+                )
+            })
+            .unwrap_or_else(|| "High or critical findings block install or merge.".to_string()),
+        GateDecision::NeedsManualReview => sorted
+            .first()
+            .map(|finding| {
+                format!(
+                    "{} finding `{}` on `{}` requires manual review before approval.",
+                    finding.severity.as_str(),
+                    finding.code,
+                    finding.target
+                )
+            })
+            .unwrap_or_else(|| {
+                "Medium findings require manual review before approval.".to_string()
+            }),
+        GateDecision::Allow => {
+            if findings.is_empty() {
+                "No configured checks flagged risk.".to_string()
+            } else {
+                "Only low or informational findings were found.".to_string()
+            }
+        }
+    }
+}
+
+fn severity_counts(findings: &[Finding]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
     for finding in findings {
         *counts
             .entry(finding.severity.as_str().to_string())
@@ -2832,9 +2953,189 @@ fn severity_counts(findings: &[Finding]) -> HashMap<String, usize> {
     counts
 }
 
+fn finding_groups(findings: &[Finding]) -> Vec<FindingGroup> {
+    let mut groups: BTreeMap<String, Vec<&Finding>> = BTreeMap::new();
+    for finding in findings {
+        groups
+            .entry(finding.code.clone())
+            .or_default()
+            .push(finding);
+    }
+    let mut output = groups
+        .into_iter()
+        .map(|(code, group)| FindingGroup {
+            category: finding_category(&code),
+            highest_risk: highest_severity_refs(&group),
+            count: group.len(),
+            summary: severity_counts_refs(&group),
+            code,
+        })
+        .collect::<Vec<_>>();
+    output.sort_by_key(|group| {
+        (
+            Reverse(severity_score_from_str(&group.highest_risk)),
+            finding_priority(&group.code),
+            group.code.clone(),
+        )
+    });
+    output
+}
+
+fn advisory_package_summaries(findings: &[Finding]) -> Vec<AdvisoryPackageSummary> {
+    let mut groups: BTreeMap<String, Vec<&Finding>> = BTreeMap::new();
+    for finding in findings
+        .iter()
+        .filter(|finding| finding.code == "cve_advisory")
+    {
+        groups
+            .entry(advisory_package_from_target(&finding.target))
+            .or_default()
+            .push(finding);
+    }
+    let mut summaries = groups
+        .into_iter()
+        .map(|(package, group)| {
+            let mut sample_advisories = group
+                .iter()
+                .map(|finding| finding.message.clone())
+                .collect::<Vec<_>>();
+            sample_advisories.sort();
+            sample_advisories.dedup();
+            sample_advisories.truncate(3);
+            AdvisoryPackageSummary {
+                package,
+                highest_risk: highest_severity_refs(&group),
+                advisory_count: group.len(),
+                fix_available: fix_available_summary(&group),
+                sample_advisories,
+            }
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by_key(|summary| {
+        (
+            Reverse(severity_score_from_str(&summary.highest_risk)),
+            Reverse(summary.advisory_count),
+            summary.package.clone(),
+        )
+    });
+    summaries
+}
+
+fn finding_category(code: &str) -> &'static str {
+    match code {
+        "source_db_match" => "malware",
+        "cve_advisory"
+        | "cve_audit_failed"
+        | "cve_audit_invalid_json"
+        | "cve_audit_unsupported_lockfile" => "advisory",
+        "lifecycle_script" | "lockfile_install_script" => "lifecycle",
+        "non_registry_spec"
+        | "non_registry_dependency"
+        | "non_allowed_registry"
+        | "git_lockfile_source"
+        | "http_tarball"
+        | "http_dependency"
+        | "local_or_workspace_dependency" => "source",
+        "deprecated_package"
+        | "missing_repository"
+        | "missing_license"
+        | "no_maintainers"
+        | "single_maintainer"
+        | "new_package"
+        | "recent_publish"
+        | "very_recent_publish"
+        | "large_dependency_fanout"
+        | "registry_missing_integrity" => "metadata",
+        "lockfile_bin"
+        | "package_bin"
+        | "many_duplicate_versions"
+        | "broad_version_range"
+        | "core_module_shadow"
+        | "possible_typosquat"
+        | "missing_integrity" => "hygiene",
+        _ => "other",
+    }
+}
+
+fn finding_priority(code: &str) -> u8 {
+    match code {
+        "source_db_match" => 0,
+        "cve_advisory" => 1,
+        "cve_audit_failed" | "cve_audit_invalid_json" => 2,
+        "lifecycle_script" | "lockfile_install_script" => 3,
+        "non_registry_spec"
+        | "non_registry_dependency"
+        | "non_allowed_registry"
+        | "git_lockfile_source"
+        | "http_tarball"
+        | "http_dependency" => 4,
+        _ => 9,
+    }
+}
+
+fn severity_counts_refs(findings: &[&Finding]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for finding in findings {
+        *counts
+            .entry(finding.severity.as_str().to_string())
+            .or_default() += 1;
+    }
+    counts
+}
+
+fn highest_severity_refs(findings: &[&Finding]) -> String {
+    findings
+        .iter()
+        .max_by_key(|finding| finding.severity.score())
+        .map(|finding| finding.severity.as_str().to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn severity_score_from_str(value: &str) -> u8 {
+    match value {
+        "critical" => Severity::Critical.score(),
+        "high" => Severity::High.score(),
+        "medium" => Severity::Medium.score(),
+        "low" => Severity::Low.score(),
+        "info" => Severity::Info.score(),
+        _ => 0,
+    }
+}
+
+fn advisory_package_from_target(target: &str) -> String {
+    target
+        .split_once(':')
+        .map(|(_, package)| package.to_string())
+        .unwrap_or_else(|| target.to_string())
+}
+
+fn fix_available_summary(findings: &[&Finding]) -> Option<String> {
+    let mut values = findings
+        .iter()
+        .filter_map(|finding| finding.evidence.as_deref())
+        .filter_map(|evidence| {
+            evidence
+                .split_whitespace()
+                .find(|part| part.starts_with("fixAvailable="))
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    if values.is_empty() {
+        None
+    } else if values.len() == 1 {
+        values.into_iter().next()
+    } else {
+        Some(format!("{} distinct fix states", values.len()))
+    }
+}
+
 fn render_report_text(report: &ReportOutput) -> String {
     let mut lines = vec![
         "mcaifee report".to_string(),
+        format!("decision: {}", report.decision.as_str()),
+        format!("reason: {}", report.decision_reason),
         format!("highest risk: {}", report.highest_risk),
         format!("scope: {}", report.scope.join(", ")),
         String::new(),
@@ -2868,6 +3169,34 @@ fn render_report_text(report: &ReportOutput) -> String {
             lockfile.install_script_count,
             lockfile.non_registry_sources
         ));
+    }
+    lines.push(String::new());
+    lines.push("finding groups:".to_string());
+    for group in &report.finding_groups {
+        lines.push(format!(
+            "- [{}] {} {} findings={}",
+            group.highest_risk, group.category, group.code, group.count
+        ));
+    }
+    if !report.advisory_packages.is_empty() {
+        lines.push(String::new());
+        lines.push("advisory packages:".to_string());
+        for advisory in report.advisory_packages.iter().take(10) {
+            lines.push(format!(
+                "- [{}] {} advisories={}{}",
+                advisory.highest_risk,
+                advisory.package,
+                advisory.advisory_count,
+                advisory
+                    .fix_available
+                    .as_deref()
+                    .map(|fix| format!(" {fix}"))
+                    .unwrap_or_default()
+            ));
+            for title in &advisory.sample_advisories {
+                lines.push(format!("  - {title}"));
+            }
+        }
     }
     lines.push(String::new());
     lines.push(render_text(&report.findings, &report.scope));
@@ -4245,6 +4574,8 @@ fn render_text(findings: &[Finding], scopes: &[String]) -> String {
             }
         ),
         format!("highest risk: {}", highest_severity(findings)),
+        format!("decision: {}", gate_decision(findings).as_str()),
+        format!("reason: {}", decision_reason(findings)),
         String::new(),
     ];
     if findings.is_empty() {
@@ -4276,13 +4607,7 @@ fn render_text(findings: &[Finding], scopes: &[String]) -> String {
     lines.push(format!("summary: {summary}"));
     lines.push(String::new());
     let mut sorted = findings.to_vec();
-    sorted.sort_by_key(|finding| {
-        (
-            Reverse(finding.severity.score()),
-            finding.target.clone(),
-            finding.code.clone(),
-        )
-    });
+    sorted.sort_by_key(finding_sort_key);
     for finding in sorted {
         lines.push(format!(
             "[{}] {} {}: {}",
@@ -4296,6 +4621,15 @@ fn render_text(findings: &[Finding], scopes: &[String]) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn finding_sort_key(finding: &Finding) -> (Reverse<u8>, u8, String, String) {
+    (
+        Reverse(finding.severity.score()),
+        finding_priority(&finding.code),
+        finding.target.clone(),
+        finding.code.clone(),
+    )
 }
 
 fn value_to_evidence(value: &Value) -> String {
@@ -5106,5 +5440,101 @@ packages:
 
         assert!(error.contains("registry.npmjs.org"));
         assert!(error.contains("audit endpoint returned an error"));
+    }
+
+    #[test]
+    fn gate_decision_matches_highest_severity() {
+        assert_eq!(gate_decision(&[]), GateDecision::Allow);
+        assert_eq!(
+            gate_decision(&[Finding::new(
+                Severity::Low,
+                "package-lock.json:bin",
+                "lockfile_bin",
+                "Package exposes executable binaries.",
+                None,
+            )]),
+            GateDecision::Allow
+        );
+        assert_eq!(
+            gate_decision(&[Finding::new(
+                Severity::Medium,
+                "package-lock.json:scripted",
+                "lockfile_install_script",
+                "Package has an install script.",
+                None,
+            )]),
+            GateDecision::NeedsManualReview
+        );
+        assert_eq!(
+            gate_decision(&[Finding::new(
+                Severity::High,
+                "package-lock.json:fs",
+                "core_module_shadow",
+                "Package shadows a core module.",
+                None,
+            )]),
+            GateDecision::Quarantine
+        );
+    }
+
+    #[test]
+    fn dedupe_findings_removes_exact_duplicates() {
+        let mut findings = vec![
+            Finding::new(
+                Severity::High,
+                "package-lock.json:axios",
+                "cve_advisory",
+                "SSRF in axios",
+                Some("url=https://github.com/advisories/GHSA-test".to_string()),
+            ),
+            Finding::new(
+                Severity::High,
+                "package-lock.json:axios",
+                "cve_advisory",
+                "SSRF in axios",
+                Some("url=https://github.com/advisories/GHSA-test".to_string()),
+            ),
+        ];
+
+        dedupe_findings(&mut findings);
+
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn advisory_summary_groups_cves_by_package() {
+        let findings = vec![
+            Finding::new(
+                Severity::High,
+                "package-lock.json:axios",
+                "cve_advisory",
+                "SSRF in axios",
+                Some("fixAvailable=true".to_string()),
+            ),
+            Finding::new(
+                Severity::Critical,
+                "package-lock.json:axios",
+                "cve_advisory",
+                "RCE in axios",
+                Some("fixAvailable=true".to_string()),
+            ),
+            Finding::new(
+                Severity::Low,
+                "package-lock.json:webpack",
+                "cve_advisory",
+                "Low risk webpack advisory",
+                None,
+            ),
+        ];
+
+        let summaries = advisory_package_summaries(&findings);
+
+        assert_eq!(summaries[0].package, "axios");
+        assert_eq!(summaries[0].highest_risk, "critical");
+        assert_eq!(summaries[0].advisory_count, 2);
+        assert_eq!(
+            summaries[0].fix_available.as_deref(),
+            Some("fixAvailable=true")
+        );
     }
 }

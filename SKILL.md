@@ -71,6 +71,8 @@ mcaifee audit --online --format json
 
 `audit` is an alias of `report`.
 
+Reports include a gate decision (`allow`, `needs_manual_review`, or `quarantine`), grouped finding summaries, and advisory package rollups when npm/pnpm audit data is available.
+
 For proposed packages:
 
 ```bash
