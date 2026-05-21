@@ -1146,10 +1146,8 @@ fn run_external_command(program: &str, args: &[String]) -> i32 {
 
 fn run_npm_internal_command(args: &[String]) -> i32 {
     let mut command = Command::new("npm");
-    command
-        .args(args)
-        .env("NPM_CONFIG_CACHE", mcaifee_npm_cache_dir())
-        .env("npm_config_cache", mcaifee_npm_cache_dir());
+    command.args(args);
+    apply_npm_internal_env(&mut command);
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
@@ -1159,10 +1157,35 @@ fn run_npm_internal_command(args: &[String]) -> i32 {
     }
 }
 
-fn mcaifee_npm_cache_dir() -> PathBuf {
-    let dir = env::temp_dir().join(format!("mcaifee-npm-cache-{}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
-    dir
+#[derive(Debug)]
+struct NpmInternalEnv {
+    cache_dir: PathBuf,
+    logs_dir: PathBuf,
+}
+
+fn apply_npm_internal_env(command: &mut Command) {
+    let npm_env = npm_internal_env();
+    command
+        .env("NPM_CONFIG_CACHE", &npm_env.cache_dir)
+        .env("npm_config_cache", &npm_env.cache_dir)
+        .env("NPM_CONFIG_LOGS_DIR", &npm_env.logs_dir)
+        .env("npm_config_logs_dir", &npm_env.logs_dir)
+        .env("NPM_CONFIG_FUND", "false")
+        .env("npm_config_fund", "false")
+        .env("NPM_CONFIG_AUDIT", "false")
+        .env("npm_config_audit", "false")
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+        .env("npm_config_update_notifier", "false");
+}
+
+fn npm_internal_env() -> NpmInternalEnv {
+    let cache_dir = env::temp_dir().join(format!("mcaifee-npm-cache-{}", std::process::id()));
+    let logs_dir = cache_dir.join("_logs");
+    let _ = fs::create_dir_all(&logs_dir);
+    NpmInternalEnv {
+        cache_dir,
+        logs_dir,
+    }
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -3289,12 +3312,10 @@ fn analyze_lockfile_v1_dependencies(
 }
 
 fn run_npm_view(spec: &str, _timeout: u64) -> Result<Value, String> {
-    let output = Command::new("npm")
-        .args(["view", spec, "--json"])
-        .env("NPM_CONFIG_FUND", "false")
-        .env("NPM_CONFIG_AUDIT", "false")
-        .env("NPM_CONFIG_CACHE", mcaifee_npm_cache_dir())
-        .env("npm_config_cache", mcaifee_npm_cache_dir())
+    let mut command = Command::new("npm");
+    command.args(["view", spec, "--json"]);
+    apply_npm_internal_env(&mut command);
+    let output = command
         .output()
         .map_err(|error| format!("npm view failed to start: {error}"))?;
     if !output.status.success() {
@@ -3307,12 +3328,10 @@ fn run_npm_view(spec: &str, _timeout: u64) -> Result<Value, String> {
 }
 
 fn run_npm_view_time(name: &str, _timeout: u64) -> Option<Value> {
-    Command::new("npm")
-        .args(["view", name, "time", "--json"])
-        .env("NPM_CONFIG_FUND", "false")
-        .env("NPM_CONFIG_AUDIT", "false")
-        .env("NPM_CONFIG_CACHE", mcaifee_npm_cache_dir())
-        .env("npm_config_cache", mcaifee_npm_cache_dir())
+    let mut command = Command::new("npm");
+    command.args(["view", name, "time", "--json"]);
+    apply_npm_internal_env(&mut command);
+    command
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -3789,6 +3808,20 @@ mod tests {
         assert!(staged.contains(&"--package-lock-only".to_string()));
         assert!(staged.contains(&"--fund=false".to_string()));
         assert!(staged.contains(&"--audit=false".to_string()));
+    }
+
+    #[test]
+    fn internal_npm_env_is_isolated_from_user_cache() {
+        let npm_env = npm_internal_env();
+
+        assert!(npm_env.cache_dir.starts_with(env::temp_dir()));
+        assert!(npm_env
+            .cache_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("mcaifee-npm-cache-")));
+        assert_eq!(npm_env.logs_dir, npm_env.cache_dir.join("_logs"));
+        assert!(npm_env.logs_dir.exists());
     }
 
     #[test]

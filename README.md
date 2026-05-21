@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.2.1
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.2.2
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
@@ -120,6 +120,8 @@ Emergency bypass:
 ```bash
 MCAIFEE_BYPASS=1 mcaifee npm install
 ```
+
+Mcaifee's internal npm staging and metadata calls use an isolated temporary npm cache and log directory, so broken permissions in a user's `~/.npm` cache do not leak into the pre-install gate. The final package-manager command still runs with the user's normal npm configuration after the gate passes.
 
 ## Scanner Usage
 
