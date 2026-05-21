@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mcaifee"
+  short_description: "Audit npm packages for malware risk"
+  default_prompt: "Use $mcaifee to assess npm dependency risk before installing or upgrading packages."

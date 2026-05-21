@@ -1,0 +1,33 @@
+FROM rust:1-bookworm AS builder
+
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked
+
+FROM node:22-bookworm-slim AS malicious-npm-test
+
+COPY --from=builder /src/target/release/mcaifee /usr/local/bin/mcaifee
+ENV MCAIFEE_DB_AUTO_UPDATE=0
+
+WORKDIR /malicious/evil-pkg
+RUN printf '%s\n' \
+  '{"name":"evil-pkg","version":"1.0.0","scripts":{"postinstall":"node postinstall.js"}}' \
+  > package.json \
+  && printf '%s\n' \
+  'require("fs").writeFileSync("/tmp/mcaifee-pwned", "postinstall executed\n");' \
+  > postinstall.js \
+  && npm pack --pack-destination /tmp
+
+WORKDIR /victim
+RUN printf '%s\n' \
+  '{"name":"victim","version":"1.0.0","dependencies":{"evil-pkg":"file:/tmp/evil-pkg-1.0.0.tgz"}}' \
+  > package.json \
+  && npm install --package-lock-only --ignore-scripts
+
+RUN if mcaifee npm install --mcaifee-fail-on medium; then \
+    echo "mcaifee unexpectedly allowed the malicious npm install"; \
+    exit 1; \
+  else \
+    echo "mcaifee blocked the malicious npm install before lifecycle scripts could run"; \
+  fi \
+  && test ! -f /tmp/mcaifee-pwned

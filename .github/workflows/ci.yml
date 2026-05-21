@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  rust:
+    name: rust validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Installer syntax
+        run: sh -n install.sh
+
+  lockfiles:
+    name: lockfile parser ${{ matrix.format }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: npm-package-lock
+            test: tests::analyzes_package_json_and_lockfile
+          - format: npm-shrinkwrap-v1
+            test: tests::analyzes_npm_shrinkwrap_v1_deep_dependencies
+          - format: pnpm-lock
+            test: tests::analyzes_pnpm_transitive_lockfile_entries
+          - format: yarn-lock
+            test: tests::analyzes_yarn_transitive_lockfile_entries
+          - format: bun-lock
+            test: tests::analyzes_bun_text_lockfile_entries
+          - format: bun-lockb
+            test: tests::flags_bun_binary_lockfile_for_migration
+          - format: default-discovery
+            test: tests::default_report_candidates_include_all_supported_lockfiles
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run focused lockfile regression
+        run: cargo test --locked ${{ matrix.test }} -- --exact
+
+  malicious-fixture:
+    name: malicious npm fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker fixture blocks lifecycle malware
+        run: docker build -f Dockerfile.malicious-test .
+
+  source-db:
+    name: source database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import OSV malicious package records
+        run: cargo test --locked tests::imports_osv_malicious_package_records -- --exact
+
+      - name: Match source database against lockfile versions
+        run: cargo test --locked tests::source_db_findings_match_lockfile_versions -- --exact
+
+      - name: Enforce source database refresh window
+        run: cargo test --locked tests::source_db_freshness_uses_twenty_four_hour_window -- --exact
