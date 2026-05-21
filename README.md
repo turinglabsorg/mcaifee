@@ -1,5 +1,14 @@
 # Mcaifee
 
+```text
+ __  __  ____    _    ___ _____ _____ _____
+|  \/  |/ ___|  / \  |_ _|  ___| ____| ____|
+| |\/| | |     / _ \  | || |_  |  _| |  _|
+| |  | | |___ / ___ \ | ||  _| | |___| |___
+|_|  |_|\____/_/   \_\___|_|   |_____|_____|
+          npm / pnpm / yarn / bun gate
+```
+
 Mcaifee is a Rust CLI and agent skill for gating npm, pnpm, Yarn, and Bun dependency changes before package lifecycle scripts can run.
 
 It is meant for agent-driven development, CI gates, and local installs where a package manager command might add new JavaScript dependencies. Mcaifee checks package specs, manifests, lockfiles, registry metadata, and optional Docker behavior signals before handing control back to the package manager.
