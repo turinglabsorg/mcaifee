@@ -18,7 +18,7 @@ Usage:
   ./install.sh [options]
 
 Options:
-  --version <tag>       Install a specific tag, for example v0.2.0.
+  --version <tag>       Install a specific tag, for example v0.2.1.
   --install-dir <dir>   Install directory. Default: $HOME/.local/bin.
   --source <path|url>   Install from a local file or direct URL instead of GitHub release auto-detection.
   --shell-init [shell]  Install package-manager wrappers into the shell startup file. Shell: posix, bash, zsh, fish.
