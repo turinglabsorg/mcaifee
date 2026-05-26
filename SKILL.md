@@ -81,7 +81,13 @@ mcaifee scan react@18.2.0 react-dom@18.2.0 --online
 
 Use `--online` only when network access is allowed. It calls `npm view` for live registry metadata and runs supported package-manager advisory audits (`npm audit` for npm lockfiles, `pnpm audit` for pnpm lockfiles) without executing package code.
 
-If the `mcaifee` binary is not installed, use the release artifact from `https://github.com/turinglabsorg/mcaifee/releases` or run from source with `cargo run --`.
+If the `mcaifee` binary or skill is not installed in a Codex session, install both with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --agent-skill --path-link
+```
+
+For local development, use the release artifact from `https://github.com/turinglabsorg/mcaifee/releases` or run from source with `cargo run --`.
 
 Mcaifee's built-in checks are local heuristics, local source database matches, registry metadata, npm/pnpm advisory audit, lockfile analysis, and optional Docker behavior analysis. It parses npm, pnpm, Yarn, and Bun text lockfiles; `bun.lockb` is detected as a binary legacy lockfile that must be converted for full static audit. For advisory databases beyond npm/pnpm audit, use OSV.dev, GitHub Advisory Database, and OpenSSF malicious-packages as supporting evidence; do not treat any single DB as complete for npm malware. Read `references/npm-security-sources.md` and `references/source-integration-plan.md` when choosing external security feeds or implementing source integrations.
 

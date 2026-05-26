@@ -43,6 +43,12 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
+Install for Codex agent sessions, including the skill and a PATH-visible symlink for headless runs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --agent-skill --path-link
+```
+
 Or download a release binary manually:
 
 ```bash
