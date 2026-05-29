@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ const MCAIFEE_ASCII: &str = r#"
 
 const DEFAULT_SOURCE_DB_MAX_AGE_HOURS: i64 = 24;
 const DEFAULT_MINIMUM_VERSION_AGE_HOURS: i64 = 168;
+const DEFAULT_LOG_RETENTION_DAYS: i64 = 30;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -188,6 +189,55 @@ struct ConfigStatusArgs {
 }
 
 #[derive(Parser, Debug)]
+struct LogsArgs {
+    #[command(subcommand)]
+    command: LogsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum LogsCommand {
+    Status(LogsStatusArgs),
+    Tail(LogsTailArgs),
+    Prune(LogsPruneArgs),
+}
+
+#[derive(Parser, Debug, Default)]
+struct LogsStatusArgs {
+    #[arg(long = "log-dir", value_name = "PATH")]
+    log_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct LogsTailArgs {
+    #[arg(long = "log-dir", value_name = "PATH")]
+    log_dir: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 20, help = "Number of log lines to print")]
+    lines: usize,
+}
+
+#[derive(Parser, Debug)]
+struct LogsPruneArgs {
+    #[arg(long = "log-dir", value_name = "PATH")]
+    log_dir: Option<PathBuf>,
+
+    #[arg(long, help = "Delete invocation logs older than this many days")]
+    days: Option<i64>,
+
+    #[arg(long, help = "Print matching files without deleting them")]
+    dry_run: bool,
+}
+
+#[derive(Parser, Debug)]
+struct DoctorArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+
+    #[arg(long, help = "Exit non-zero when warnings are present")]
+    strict: bool,
+}
+
+#[derive(Parser, Debug)]
 struct ShellInitArgs {
     #[arg(long, value_enum, default_value_t = ShellKind::Posix)]
     shell: ShellKind,
@@ -277,6 +327,40 @@ struct ReportOutput {
     sources: Vec<SourceSummary>,
     recommended_next_steps: Vec<String>,
     paranoia: Option<ParanoiaSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorOutput {
+    tool: &'static str,
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+impl DoctorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            DoctorStatus::Pass => "pass",
+            DoctorStatus::Warn => "warn",
+            DoctorStatus::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -389,6 +473,7 @@ struct UserConfig {
     timeout_seconds: Option<u64>,
     log_invocations: Option<bool>,
     log_dir: Option<PathBuf>,
+    log_retention_days: Option<i64>,
     cache_dir: Option<PathBuf>,
     source_db_path: Option<PathBuf>,
 }
@@ -627,6 +712,23 @@ fn run_cli(raw_args: &[String]) -> i32 {
             Ok(args) => run_config(args),
             Err(status) => status,
         }
+    } else if raw_args.first().is_some_and(|arg| arg == "doctor") {
+        let mut doctor_args = vec!["mcaifee doctor".to_string()];
+        doctor_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(DoctorArgs::try_parse_from(doctor_args)) {
+            Ok(args) => run_doctor(args),
+            Err(status) => status,
+        }
+    } else if raw_args.first().is_some_and(|arg| arg == "logs") {
+        if raw_args.len() == 1 {
+            return run_logs_status(LogsStatusArgs::default());
+        }
+        let mut logs_args = vec!["mcaifee logs".to_string()];
+        logs_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(LogsArgs::try_parse_from(logs_args)) {
+            Ok(args) => run_logs(args),
+            Err(status) => status,
+        }
     } else if raw_args
         .first()
         .is_some_and(|arg| arg == "report" || arg == "audit")
@@ -698,13 +800,16 @@ impl InvocationLog {
 }
 
 fn invocation_logging_enabled() -> bool {
+    invocation_logging_enabled_with_config(
+        &read_config_file(&default_config_path()).unwrap_or_default(),
+    )
+}
+
+fn invocation_logging_enabled_with_config(config: &UserConfig) -> bool {
     if let Ok(value) = env::var("MCAIFEE_LOG_INVOCATIONS") {
         return !is_false_env_value(&value);
     }
-    read_config_file(&default_config_path())
-        .ok()
-        .and_then(|config| config.log_invocations)
-        .unwrap_or(true)
+    config.log_invocations.unwrap_or(true)
 }
 
 fn is_false_env_value(value: &str) -> bool {
@@ -732,6 +837,25 @@ fn invocation_log_dir_with_config(config: &UserConfig) -> PathBuf {
         .map(|path| expand_home_path(&path))
         .or_else(|| config.log_dir.as_ref().map(|path| expand_home_path(path)))
         .unwrap_or_else(|| default_mcaifee_dir().join("logs"))
+}
+
+fn invocation_log_dir_for_command(config: &UserConfig, override_dir: Option<PathBuf>) -> PathBuf {
+    override_dir
+        .map(|path| expand_home_path(&path))
+        .unwrap_or_else(|| invocation_log_dir_with_config(config))
+}
+
+fn log_retention_days() -> i64 {
+    log_retention_days_with_config(&read_config_file(&default_config_path()).unwrap_or_default())
+}
+
+fn log_retention_days_with_config(config: &UserConfig) -> i64 {
+    env::var("MCAIFEE_LOG_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or(config.log_retention_days)
+        .unwrap_or(DEFAULT_LOG_RETENTION_DAYS)
+        .max(0)
 }
 
 fn invocation_log_record(
@@ -797,7 +921,13 @@ fn append_invocation_log(record: &Value, timestamp: DateTime<Utc>) -> io::Result
     let mut file = options.open(log_path)?;
     let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
     line.push(b'\n');
-    file.write_all(&line)
+    file.write_all(&line)?;
+    let retention_days = log_retention_days();
+    if retention_days > 0 {
+        let _ =
+            prune_invocation_logs_in_dir(&log_dir, timestamp.date_naive(), retention_days, false);
+    }
+    Ok(())
 }
 
 struct LogFileLock {
@@ -843,6 +973,118 @@ fn log_lock_is_stale(lock_path: &Path) -> bool {
         .ok()
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|age| age > StdDuration::from_secs(30))
+}
+
+#[derive(Debug)]
+struct LogStats {
+    exists: bool,
+    files: usize,
+    events: usize,
+    oldest_date: Option<NaiveDate>,
+    newest_date: Option<NaiveDate>,
+}
+
+fn invocation_log_file_date(path: &Path) -> Option<NaiveDate> {
+    let filename = path.file_name()?.to_str()?;
+    let date = filename
+        .strip_prefix("invocations-")?
+        .strip_suffix(".jsonl")?;
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
+}
+
+fn invocation_log_files(log_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    if !log_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(log_dir)? {
+        let path = entry?.path();
+        if invocation_log_file_date(&path).is_some() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn invocation_log_stats(log_dir: &Path) -> io::Result<LogStats> {
+    let files = invocation_log_files(log_dir)?;
+    let mut events = 0;
+    let mut oldest_date: Option<NaiveDate> = None;
+    let mut newest_date: Option<NaiveDate> = None;
+    for path in &files {
+        events += count_file_lines(path)?;
+        if let Some(date) = invocation_log_file_date(path) {
+            oldest_date = Some(oldest_date.map_or(date, |oldest| oldest.min(date)));
+            newest_date = Some(newest_date.map_or(date, |newest| newest.max(date)));
+        }
+    }
+    Ok(LogStats {
+        exists: log_dir.exists(),
+        files: files.len(),
+        events,
+        oldest_date,
+        newest_date,
+    })
+}
+
+fn count_file_lines(path: &Path) -> io::Result<usize> {
+    let file = fs::File::open(path)?;
+    let reader = io::BufReader::new(file);
+    let mut count = 0;
+    for line in reader.lines() {
+        line?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn tail_invocation_logs(log_dir: &Path, line_count: usize) -> io::Result<Vec<String>> {
+    if line_count == 0 {
+        return Ok(Vec::new());
+    }
+    let files = invocation_log_files(log_dir)?;
+    let mut lines = Vec::new();
+    for path in files.iter().rev() {
+        let file_lines = read_file_lines(path)?;
+        for line in file_lines.into_iter().rev() {
+            lines.push(line);
+            if lines.len() >= line_count {
+                lines.reverse();
+                return Ok(lines);
+            }
+        }
+    }
+    lines.reverse();
+    Ok(lines)
+}
+
+fn read_file_lines(path: &Path) -> io::Result<Vec<String>> {
+    let file = fs::File::open(path)?;
+    let reader = io::BufReader::new(file);
+    reader.lines().collect()
+}
+
+fn prune_invocation_logs_in_dir(
+    log_dir: &Path,
+    today: NaiveDate,
+    retention_days: i64,
+    dry_run: bool,
+) -> io::Result<Vec<PathBuf>> {
+    if retention_days <= 0 || !log_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let cutoff = today - Duration::days(retention_days);
+    let mut pruned = Vec::new();
+    for path in invocation_log_files(log_dir)? {
+        if invocation_log_file_date(&path).is_some_and(|date| date < cutoff) {
+            if !dry_run {
+                fs::remove_file(&path)?;
+            }
+            pruned.push(path);
+        }
+    }
+    Ok(pruned)
 }
 
 fn redact_args(args: &[String]) -> Vec<String> {
@@ -1014,6 +1256,32 @@ fn run_config(args: ConfigArgs) -> i32 {
     }
 }
 
+fn run_logs(args: LogsArgs) -> i32 {
+    match args.command {
+        LogsCommand::Status(status_args) => run_logs_status(status_args),
+        LogsCommand::Tail(tail_args) => run_logs_tail(tail_args),
+        LogsCommand::Prune(prune_args) => run_logs_prune(prune_args),
+    }
+}
+
+fn run_doctor(args: DoctorArgs) -> i32 {
+    let output = doctor_output();
+    match args.format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("serialize doctor output")
+            );
+        }
+        OutputFormat::Text => println!("{}", render_doctor_text(&output)),
+    }
+    if output.status == DoctorStatus::Fail || (args.strict && output.status == DoctorStatus::Warn) {
+        1
+    } else {
+        0
+    }
+}
+
 fn run_config_init(args: ConfigInitArgs) -> i32 {
     let config_path = args.path.unwrap_or_else(default_config_path);
     if config_path.exists() && !args.force {
@@ -1072,6 +1340,10 @@ fn run_config_status(args: ConfigStatusArgs) -> i32 {
         invocation_log_dir_with_config(&config).display()
     );
     println!(
+        "logRetentionDays: {}",
+        log_retention_days_with_config(&config)
+    );
+    println!(
         "sourceDbMaxAgeHours: {}",
         source_db_max_age_hours_with_config(&config)
     );
@@ -1092,6 +1364,334 @@ fn run_config_status(args: ConfigStatusArgs) -> i32 {
         default_source_db_path_with_config(&config).display()
     );
     0
+}
+
+fn run_logs_status(args: LogsStatusArgs) -> i32 {
+    let config = load_user_config();
+    let log_dir = invocation_log_dir_for_command(&config, args.log_dir);
+    let stats = match invocation_log_stats(&log_dir) {
+        Ok(stats) => stats,
+        Err(error) => {
+            eprintln!(
+                "mcaifee: could not inspect logs at {}: {error}",
+                log_dir.display()
+            );
+            return 1;
+        }
+    };
+    println!("mcaifee logs status");
+    println!(
+        "logInvocations: {}",
+        invocation_logging_enabled_with_config(&config)
+    );
+    println!("logDir: {}", log_dir.display());
+    println!("exists: {}", stats.exists);
+    println!("files: {}", stats.files);
+    println!("events: {}", stats.events);
+    println!(
+        "oldestDate: {}",
+        stats
+            .oldest_date
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "newestDate: {}",
+        stats
+            .newest_date
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "logRetentionDays: {}",
+        log_retention_days_with_config(&config)
+    );
+    0
+}
+
+fn run_logs_tail(args: LogsTailArgs) -> i32 {
+    let config = load_user_config();
+    let log_dir = invocation_log_dir_for_command(&config, args.log_dir);
+    let lines = match tail_invocation_logs(&log_dir, args.lines) {
+        Ok(lines) => lines,
+        Err(error) => {
+            eprintln!(
+                "mcaifee: could not read logs at {}: {error}",
+                log_dir.display()
+            );
+            return 1;
+        }
+    };
+    for line in lines {
+        println!("{line}");
+    }
+    0
+}
+
+fn run_logs_prune(args: LogsPruneArgs) -> i32 {
+    let config = load_user_config();
+    let log_dir = invocation_log_dir_for_command(&config, args.log_dir);
+    let retention_days = args
+        .days
+        .unwrap_or_else(|| log_retention_days_with_config(&config))
+        .max(0);
+    if retention_days == 0 {
+        println!("mcaifee logs prune");
+        println!("logDir: {}", log_dir.display());
+        println!("retentionDays: 0");
+        println!("deleted: 0");
+        return 0;
+    }
+    let pruned = match prune_invocation_logs_in_dir(
+        &log_dir,
+        Utc::now().date_naive(),
+        retention_days,
+        args.dry_run,
+    ) {
+        Ok(pruned) => pruned,
+        Err(error) => {
+            eprintln!(
+                "mcaifee: could not prune logs at {}: {error}",
+                log_dir.display()
+            );
+            return 1;
+        }
+    };
+    println!("mcaifee logs prune");
+    println!("logDir: {}", log_dir.display());
+    println!("retentionDays: {retention_days}");
+    println!("dryRun: {}", args.dry_run);
+    println!("deleted: {}", if args.dry_run { 0 } else { pruned.len() });
+    if args.dry_run {
+        println!("matched: {}", pruned.len());
+    }
+    for path in pruned {
+        println!("{}", path.display());
+    }
+    0
+}
+
+fn doctor_output() -> DoctorOutput {
+    let config_path = default_config_path();
+    let (config, config_check) = match read_config_file(&config_path) {
+        Ok(config) => (
+            config,
+            DoctorCheck::pass("config", format!("loaded {}", config_path.display())),
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (
+            UserConfig::default(),
+            DoctorCheck::warn(
+                "config",
+                format!(
+                    "{} is missing; built-in defaults are active",
+                    config_path.display()
+                ),
+            ),
+        ),
+        Err(error) => (
+            UserConfig::default(),
+            DoctorCheck::fail(
+                "config",
+                format!("could not read {}: {error}", config_path.display()),
+            ),
+        ),
+    };
+
+    let mut checks = vec![config_check];
+    checks.push(current_executable_check());
+    checks.push(directory_writable_check(
+        "cacheDir",
+        &default_cache_dir_with_config(&config),
+    ));
+
+    let log_dir = invocation_log_dir_with_config(&config);
+    if invocation_logging_enabled_with_config(&config) {
+        checks.push(directory_writable_check("logDir", &log_dir));
+    } else {
+        checks.push(DoctorCheck::pass(
+            "logDir",
+            format!(
+                "invocation logging is disabled; path would be {}",
+                log_dir.display()
+            ),
+        ));
+    }
+
+    checks.push(source_database_check(&config));
+    for tool in ["npm", "pnpm", "yarn", "bun", "docker"] {
+        checks.push(command_available_check(tool));
+    }
+
+    DoctorOutput {
+        tool: "mcaifee",
+        status: doctor_status(&checks),
+        checks,
+    }
+}
+
+impl DoctorCheck {
+    fn pass(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorStatus::Pass,
+            message: message.into(),
+        }
+    }
+
+    fn warn(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorStatus::Warn,
+            message: message.into(),
+        }
+    }
+
+    fn fail(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorStatus::Fail,
+            message: message.into(),
+        }
+    }
+}
+
+fn current_executable_check() -> DoctorCheck {
+    match env::current_exe() {
+        Ok(path) if path.exists() => {
+            DoctorCheck::pass("executable", format!("running {}", path.display()))
+        }
+        Ok(path) => DoctorCheck::warn(
+            "executable",
+            format!("current executable path does not exist: {}", path.display()),
+        ),
+        Err(error) => DoctorCheck::warn(
+            "executable",
+            format!("could not resolve current executable: {error}"),
+        ),
+    }
+}
+
+fn directory_writable_check(name: &str, path: &Path) -> DoctorCheck {
+    match ensure_directory_writable(path) {
+        Ok(()) => DoctorCheck::pass(name, format!("writable {}", path.display())),
+        Err(error) => DoctorCheck::fail(name, format!("not writable {}: {error}", path.display())),
+    }
+}
+
+fn ensure_directory_writable(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = path.join(format!(".mcaifee-doctor-{}-{nanos}", std::process::id()));
+    fs::write(&probe, b"ok")?;
+    fs::remove_file(probe)
+}
+
+fn source_database_check(config: &UserConfig) -> DoctorCheck {
+    let path = default_source_db_path_with_config(config);
+    match load_source_db(&path) {
+        Ok(db) => {
+            if source_db_needs_update(
+                &path,
+                Duration::hours(source_db_max_age_hours_with_config(config)),
+            ) {
+                DoctorCheck::warn(
+                    "sourceDb",
+                    format!("{} is stale; run `mcaifee db update`", path.display()),
+                )
+            } else {
+                DoctorCheck::pass(
+                    "sourceDb",
+                    format!(
+                        "{} has {} records updated at {}",
+                        path.display(),
+                        db.records.len(),
+                        db.updated_at
+                    ),
+                )
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => DoctorCheck::warn(
+            "sourceDb",
+            format!(
+                "{} is missing; wrapper auto-update can populate it",
+                path.display()
+            ),
+        ),
+        Err(error) => DoctorCheck::fail(
+            "sourceDb",
+            format!("could not read {}: {error}", path.display()),
+        ),
+    }
+}
+
+fn command_available_check(command: &str) -> DoctorCheck {
+    match command_in_path(command) {
+        Some(path) => DoctorCheck::pass(command, format!("found {}", path.display())),
+        None if command == "docker" => DoctorCheck::warn(
+            command,
+            "not found in PATH; paranoia mode is unavailable".to_string(),
+        ),
+        None => DoctorCheck::warn(
+            command,
+            format!("not found in PATH; `{command}` wrapper commands will not work"),
+        ),
+    }
+}
+
+fn command_in_path(command: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    for dir in env::split_paths(&paths) {
+        let candidate = dir.join(command);
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        return Some(candidate);
+    }
+    None
+}
+
+fn doctor_status(checks: &[DoctorCheck]) -> DoctorStatus {
+    if checks
+        .iter()
+        .any(|check| check.status == DoctorStatus::Fail)
+    {
+        DoctorStatus::Fail
+    } else if checks
+        .iter()
+        .any(|check| check.status == DoctorStatus::Warn)
+    {
+        DoctorStatus::Warn
+    } else {
+        DoctorStatus::Pass
+    }
+}
+
+fn render_doctor_text(output: &DoctorOutput) -> String {
+    let mut lines = vec![
+        "mcaifee doctor".to_string(),
+        format!("status: {}", output.status.as_str()),
+    ];
+    for check in &output.checks {
+        lines.push(format!(
+            "[{}] {}: {}",
+            check.status.as_str(),
+            check.name,
+            check.message
+        ));
+    }
+    lines.join("\n")
 }
 
 fn run_db_update(args: DbUpdateArgs) -> i32 {
@@ -1932,6 +2532,7 @@ fn default_config_file() -> UserConfig {
         timeout_seconds: Some(20),
         log_invocations: Some(true),
         log_dir: Some(PathBuf::from("~/.mcaifee/logs")),
+        log_retention_days: Some(DEFAULT_LOG_RETENTION_DAYS),
         cache_dir: Some(PathBuf::from("~/.mcaifee/cache")),
         source_db_path: None,
     }
@@ -5510,6 +6111,64 @@ mod tests {
     }
 
     #[test]
+    fn parses_invocation_log_dates_from_expected_filenames() {
+        assert_eq!(
+            invocation_log_file_date(Path::new("invocations-2026-05-29.jsonl")),
+            NaiveDate::from_ymd_opt(2026, 5, 29)
+        );
+        assert_eq!(invocation_log_file_date(Path::new("other.jsonl")), None);
+        assert_eq!(
+            invocation_log_file_date(Path::new("invocations-not-a-date.jsonl")),
+            None
+        );
+    }
+
+    #[test]
+    fn prunes_invocation_logs_older_than_retention_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_log = dir.path().join("invocations-2026-04-01.jsonl");
+        let fresh_log = dir.path().join("invocations-2026-05-20.jsonl");
+        let unrelated = dir.path().join("notes.txt");
+        fs::write(&old_log, "{}\n").unwrap();
+        fs::write(&fresh_log, "{}\n").unwrap();
+        fs::write(&unrelated, "keep").unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+
+        let pruned = prune_invocation_logs_in_dir(dir.path(), today, 30, false).unwrap();
+
+        assert_eq!(pruned, vec![old_log.clone()]);
+        assert!(!old_log.exists());
+        assert!(fresh_log.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn tails_invocation_logs_across_files_in_chronological_order() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("invocations-2026-05-28.jsonl"),
+            "old-1\nold-2\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("invocations-2026-05-29.jsonl"),
+            "new-1\nnew-2\n",
+        )
+        .unwrap();
+
+        let lines = tail_invocation_logs(dir.path(), 3).unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                "old-2".to_string(),
+                "new-1".to_string(),
+                "new-2".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn redact_url_credentials_preserves_non_secret_urls() {
         assert_eq!(
             redact_url_credentials("https://user:pass@example.com/path?ok=1"),
@@ -5813,6 +6472,11 @@ mod tests {
         );
         assert_eq!(config.log_invocations, Some(true));
         assert_eq!(config.log_dir, Some(PathBuf::from("~/.mcaifee/logs")));
+        assert_eq!(config.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
+        assert_eq!(
+            log_retention_days_with_config(&config),
+            DEFAULT_LOG_RETENTION_DAYS
+        );
         assert_eq!(
             effective_policy_with_config(&config, Some(0)).minimum_version_age_hours,
             0
@@ -6264,6 +6928,28 @@ packages:
                 None,
             )]),
             GateDecision::Quarantine
+        );
+    }
+
+    #[test]
+    fn doctor_status_prioritizes_failures_then_warnings() {
+        assert_eq!(
+            doctor_status(&[DoctorCheck::pass("config", "ok")]),
+            DoctorStatus::Pass
+        );
+        assert_eq!(
+            doctor_status(&[
+                DoctorCheck::pass("config", "ok"),
+                DoctorCheck::warn("sourceDb", "missing")
+            ]),
+            DoctorStatus::Warn
+        );
+        assert_eq!(
+            doctor_status(&[
+                DoctorCheck::warn("sourceDb", "missing"),
+                DoctorCheck::fail("logDir", "not writable")
+            ]),
+            DoctorStatus::Fail
         );
     }
 

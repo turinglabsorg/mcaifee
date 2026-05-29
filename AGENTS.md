@@ -15,6 +15,8 @@
 - Internal npm staging and npm registry metadata calls use an isolated temporary npm cache/log directory so user `~/.npm` permission problems do not affect the gate.
 - Shell integration supports `mcaifee shell-init`, `mcaifee shell-disable`, and `mcaifee shell-status` so plain `npm`, `pnpm`, `yarn`, and `bun` calls can be wrapped in the current shell.
 - Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, gate decisions, grouped finding summaries, and advisory package rollups.
+- Invocation logs live under `~/.mcaifee/logs/` by default, are retained for 30 days by default, and can be inspected or pruned with `mcaifee logs status`, `mcaifee logs tail`, and `mcaifee logs prune`.
+- `mcaifee doctor` checks config parsing, the active executable, cache/log writability, source DB freshness, and package-manager/Docker availability.
 - `--paranoia` or `MCAIFEE_PARANOIA=1` runs an extra Docker install simulation with network disabled by default, fake canary credentials, dropped capabilities, and a read-only project mount.
 - Wrapper logs print an ASCII Mcaifee banner before gated package-manager commands.
 
@@ -33,6 +35,7 @@
 ## Validation
 
 - Rust validation: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and `cargo build --release --locked`.
+- Runtime smoke validation: `mcaifee doctor`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
 - Installer validation: `./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run`.
 - Skill validation: `quick_validate.py` against the skill root.
 - Malicious npm gate test: `docker build -f Dockerfile.malicious-test .`.

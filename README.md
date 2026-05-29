@@ -24,6 +24,8 @@ The repository includes a portable `SKILL.md` entrypoint for any agent runtime t
 - Flags package versions that are newer than the configured minimum age, 7 days by default.
 - Matches resolved packages against a local source database built from OSV-style malicious package records through `mcaifee db update`.
 - Prints full text or JSON reports through `report` and `audit`.
+- Writes redacted invocation logs with retention controls and inspection commands.
+- Provides `mcaifee doctor` for local health checks of config, cache, logs, source DB, and required tools.
 - Can run a Docker behavior simulation in paranoia mode with network disabled by default.
 
 Mcaifee is a gate, not a complete malware oracle. A clean result means the configured checks did not flag risk; it does not prove a package is benign.
@@ -94,6 +96,7 @@ Default config:
   "timeoutSeconds": 20,
   "logInvocations": true,
   "logDir": "~/.mcaifee/logs",
+  "logRetentionDays": 30,
   "cacheDir": "~/.mcaifee/cache",
   "sourceDbPath": null
 }
@@ -114,14 +117,38 @@ Mcaifee records one JSONL event per invocation in `~/.mcaifee/logs/` by default.
 
 Logs are best-effort: logging failures never block the dependency gate. Sensitive argument names such as tokens, passwords, credentials, auth values, API keys, and URL credentials are redacted before writing.
 
+By default, invocation logs older than 30 days are pruned after successful log writes. Set `logRetentionDays` or `MCAIFEE_LOG_RETENTION_DAYS`; use `0` to disable automatic pruning.
+
 Configuration:
 
 ```bash
 MCAIFEE_LOG_INVOCATIONS=0 mcaifee npm install
 MCAIFEE_LOG_DIR=/tmp/mcaifee-logs mcaifee report
+MCAIFEE_LOG_RETENTION_DAYS=14 mcaifee report
 ```
 
-Or set `logInvocations` / `logDir` in `~/.mcaifee/config.json`.
+Or set `logInvocations`, `logDir`, and `logRetentionDays` in `~/.mcaifee/config.json`.
+
+Inspect or prune logs:
+
+```bash
+mcaifee logs status
+mcaifee logs tail --lines 50
+mcaifee logs prune --days 30 --dry-run
+mcaifee logs prune --days 30
+```
+
+## Doctor
+
+Use `doctor` to verify the local install without running package lifecycle code:
+
+```bash
+mcaifee doctor
+mcaifee doctor --format json
+mcaifee doctor --strict
+```
+
+The health check covers config parsing, the active executable, cache/log directory writability, source database freshness, and the presence of `npm`, `pnpm`, `yarn`, `bun`, and `docker` on `PATH`. Warnings do not fail by default; `--strict` exits non-zero when warnings are present.
 
 ## Wrapper Usage
 
