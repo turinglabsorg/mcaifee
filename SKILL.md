@@ -64,6 +64,8 @@ The default minimum package version age is 7 days. Override it with `minimumVers
 
 Registry allowlists and command timeout policy can also live in config. Use `allowRegistryHosts`, `MCAIFEE_ALLOW_REGISTRY_HOSTS`, `--allow-registry-host`, or wrapper flag `--mcaifee-allow-registry-host` for private registries. Use `timeoutSeconds`, `MCAIFEE_TIMEOUT`, `--timeout`, or wrapper flag `--mcaifee-timeout` to cap registry, audit, and advisory queries.
 
+Every invocation writes a best-effort JSONL event to `~/.mcaifee/logs/` by default, with redacted arguments, cwd, executable path, timestamps, duration, exit code, and success state. Disable with `logInvocations: false` or `MCAIFEE_LOG_INVOCATIONS=0`; override the destination with `logDir` or `MCAIFEE_LOG_DIR`.
+
 For a complete review artifact:
 
 ```bash

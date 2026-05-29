@@ -7,7 +7,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -385,6 +387,8 @@ struct UserConfig {
     auto_update_source_db: Option<bool>,
     allow_registry_hosts: Option<Vec<String>>,
     timeout_seconds: Option<u64>,
+    log_invocations: Option<bool>,
+    log_dir: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
     source_db_path: Option<PathBuf>,
 }
@@ -584,45 +588,332 @@ fn suspicious_script_patterns() -> &'static Vec<ScriptPattern> {
 
 pub fn main() {
     let raw_args = env::args().skip(1).collect::<Vec<_>>();
-    let status =
-        if let Some((package_manager, package_manager_args)) = split_wrapper_args(&raw_args) {
-            run_package_manager_wrapper(package_manager, package_manager_args)
-        } else if raw_args.first().is_some_and(|arg| arg == "shell-init") {
-            let mut shell_args = vec!["mcaifee shell-init".to_string()];
-            shell_args.extend(raw_args.into_iter().skip(1));
-            run_shell_init(ShellInitArgs::parse_from(shell_args))
-        } else if raw_args.first().is_some_and(|arg| arg == "shell-disable") {
-            let mut shell_args = vec!["mcaifee shell-disable".to_string()];
-            shell_args.extend(raw_args.into_iter().skip(1));
-            run_shell_disable(ShellDisableArgs::parse_from(shell_args))
-        } else if raw_args.first().is_some_and(|arg| arg == "shell-status") {
-            run_shell_status()
-        } else if raw_args.first().is_some_and(|arg| arg == "db") {
-            let mut db_args = vec!["mcaifee db".to_string()];
-            db_args.extend(raw_args.into_iter().skip(1));
-            run_db(DbArgs::parse_from(db_args))
-        } else if raw_args.first().is_some_and(|arg| arg == "config") {
-            let mut config_args = vec!["mcaifee config".to_string()];
-            config_args.extend(raw_args.into_iter().skip(1));
-            run_config(ConfigArgs::parse_from(config_args))
-        } else if raw_args
-            .first()
-            .is_some_and(|arg| arg == "report" || arg == "audit")
-        {
-            let mut report_args = vec!["mcaifee report".to_string()];
-            report_args.extend(raw_args.into_iter().skip(1));
-            run_report(ReportArgs::parse_from(report_args))
-        } else {
-            let args = if raw_args.first().is_some_and(|arg| arg == "scan") {
-                let mut scan_args = vec!["mcaifee".to_string()];
-                scan_args.extend(raw_args.into_iter().skip(1));
-                Args::parse_from(scan_args)
-            } else {
-                Args::parse()
-            };
-            run(args)
-        };
+    let invocation = InvocationLog::start(&raw_args);
+    let status = run_cli(&raw_args);
+    invocation.finish(status);
     std::process::exit(status);
+}
+
+fn run_cli(raw_args: &[String]) -> i32 {
+    if let Some((package_manager, package_manager_args)) = split_wrapper_args(raw_args) {
+        run_package_manager_wrapper(package_manager, package_manager_args)
+    } else if raw_args.first().is_some_and(|arg| arg == "shell-init") {
+        let mut shell_args = vec!["mcaifee shell-init".to_string()];
+        shell_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(ShellInitArgs::try_parse_from(shell_args)) {
+            Ok(args) => run_shell_init(args),
+            Err(status) => status,
+        }
+    } else if raw_args.first().is_some_and(|arg| arg == "shell-disable") {
+        let mut shell_args = vec!["mcaifee shell-disable".to_string()];
+        shell_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(ShellDisableArgs::try_parse_from(shell_args)) {
+            Ok(args) => run_shell_disable(args),
+            Err(status) => status,
+        }
+    } else if raw_args.first().is_some_and(|arg| arg == "shell-status") {
+        run_shell_status()
+    } else if raw_args.first().is_some_and(|arg| arg == "db") {
+        let mut db_args = vec!["mcaifee db".to_string()];
+        db_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(DbArgs::try_parse_from(db_args)) {
+            Ok(args) => run_db(args),
+            Err(status) => status,
+        }
+    } else if raw_args.first().is_some_and(|arg| arg == "config") {
+        let mut config_args = vec!["mcaifee config".to_string()];
+        config_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(ConfigArgs::try_parse_from(config_args)) {
+            Ok(args) => run_config(args),
+            Err(status) => status,
+        }
+    } else if raw_args
+        .first()
+        .is_some_and(|arg| arg == "report" || arg == "audit")
+    {
+        let mut report_args = vec!["mcaifee report".to_string()];
+        report_args.extend(raw_args.iter().skip(1).cloned());
+        match parse_cli_args(ReportArgs::try_parse_from(report_args)) {
+            Ok(args) => run_report(args),
+            Err(status) => status,
+        }
+    } else {
+        let args = if raw_args.first().is_some_and(|arg| arg == "scan") {
+            let mut scan_args = vec!["mcaifee".to_string()];
+            scan_args.extend(raw_args.iter().skip(1).cloned());
+            Args::try_parse_from(scan_args)
+        } else {
+            let mut scan_args = vec!["mcaifee".to_string()];
+            scan_args.extend(raw_args.iter().cloned());
+            Args::try_parse_from(scan_args)
+        };
+        match parse_cli_args(args) {
+            Ok(args) => run(args),
+            Err(status) => status,
+        }
+    }
+}
+
+fn parse_cli_args<T>(result: Result<T, clap::Error>) -> Result<T, i32> {
+    match result {
+        Ok(args) => Ok(args),
+        Err(error) => {
+            let status = error.exit_code();
+            let _ = error.print();
+            Err(status)
+        }
+    }
+}
+
+struct InvocationLog {
+    raw_args: Vec<String>,
+    started_at: DateTime<Utc>,
+    started_instant: Instant,
+}
+
+impl InvocationLog {
+    fn start(raw_args: &[String]) -> Self {
+        Self {
+            raw_args: raw_args.to_vec(),
+            started_at: Utc::now(),
+            started_instant: Instant::now(),
+        }
+    }
+
+    fn finish(self, exit_code: i32) {
+        if !invocation_logging_enabled() {
+            return;
+        }
+        let finished_at = Utc::now();
+        let duration_ms = self.started_instant.elapsed().as_millis();
+        let record = invocation_log_record(
+            &self.raw_args,
+            self.started_at,
+            finished_at,
+            duration_ms,
+            exit_code,
+        );
+        let _ = append_invocation_log(&record, finished_at);
+    }
+}
+
+fn invocation_logging_enabled() -> bool {
+    if let Ok(value) = env::var("MCAIFEE_LOG_INVOCATIONS") {
+        return !is_false_env_value(&value);
+    }
+    read_config_file(&default_config_path())
+        .ok()
+        .and_then(|config| config.log_invocations)
+        .unwrap_or(true)
+}
+
+fn is_false_env_value(value: &str) -> bool {
+    matches!(
+        value,
+        "0" | "false" | "False" | "FALSE" | "no" | "NO" | "off" | "OFF"
+    )
+}
+
+fn invocation_log_dir() -> PathBuf {
+    env::var_os("MCAIFEE_LOG_DIR")
+        .map(PathBuf::from)
+        .map(|path| expand_home_path(&path))
+        .or_else(|| {
+            read_config_file(&default_config_path())
+                .ok()
+                .and_then(|config| config.log_dir.map(|path| expand_home_path(&path)))
+        })
+        .unwrap_or_else(|| default_mcaifee_dir().join("logs"))
+}
+
+fn invocation_log_dir_with_config(config: &UserConfig) -> PathBuf {
+    env::var_os("MCAIFEE_LOG_DIR")
+        .map(PathBuf::from)
+        .map(|path| expand_home_path(&path))
+        .or_else(|| config.log_dir.as_ref().map(|path| expand_home_path(path)))
+        .unwrap_or_else(|| default_mcaifee_dir().join("logs"))
+}
+
+fn invocation_log_record(
+    raw_args: &[String],
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    duration_ms: u128,
+    exit_code: i32,
+) -> Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "tool": "mcaifee",
+        "version": env!("CARGO_PKG_VERSION"),
+        "event": "invocation",
+        "commandKind": invocation_command_kind(raw_args),
+        "startedAt": started_at.to_rfc3339(),
+        "finishedAt": finished_at.to_rfc3339(),
+        "durationMs": duration_ms,
+        "exitCode": exit_code,
+        "success": exit_code == 0,
+        "pid": std::process::id(),
+        "cwd": env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string()),
+        "executable": env::current_exe()
+            .ok()
+            .map(|path| path.display().to_string()),
+        "args": redact_args(raw_args),
+    })
+}
+
+fn invocation_command_kind(raw_args: &[String]) -> String {
+    match raw_args.first().map(String::as_str) {
+        Some(package_manager @ ("npm" | "pnpm" | "yarn" | "bun")) => {
+            format!("wrapper:{package_manager}")
+        }
+        Some("scan") | None => "scan".to_string(),
+        Some("audit") => "report".to_string(),
+        Some(command) => command.to_string(),
+    }
+}
+
+fn append_invocation_log(record: &Value, timestamp: DateTime<Utc>) -> io::Result<()> {
+    let log_dir = invocation_log_dir();
+    fs::create_dir_all(&log_dir)?;
+    #[cfg(unix)]
+    {
+        let _ = fs::set_permissions(&log_dir, fs::Permissions::from_mode(0o700));
+    }
+    let log_path = log_dir.join(format!(
+        "invocations-{}.jsonl",
+        timestamp.format("%Y-%m-%d")
+    ));
+    let Some(_lock) = acquire_log_lock(&log_path)? else {
+        return Ok(());
+    };
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(log_path)?;
+    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    line.push(b'\n');
+    file.write_all(&line)
+}
+
+struct LogFileLock {
+    path: PathBuf,
+}
+
+impl Drop for LogFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_log_lock(log_path: &Path) -> io::Result<Option<LogFileLock>> {
+    let lock_path = log_path.with_extension("jsonl.lock");
+    for _ in 0..200 {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        match options.open(&lock_path) {
+            Ok(mut lock_file) => {
+                let _ = writeln!(lock_file, "pid={}", std::process::id());
+                return Ok(Some(LogFileLock { path: lock_path }));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if log_lock_is_stale(&lock_path) {
+                    let _ = fs::remove_file(&lock_path);
+                } else {
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn log_lock_is_stale(lock_path: &Path) -> bool {
+    fs::metadata(lock_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > StdDuration::from_secs(30))
+}
+
+fn redact_args(args: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            redacted.push("[redacted]".to_string());
+            redact_next = false;
+            continue;
+        }
+        if sensitive_flag_takes_value(arg) {
+            redact_next = !arg.contains('=');
+            redacted.push(redact_arg(arg));
+            continue;
+        }
+        redacted.push(redact_arg(arg));
+    }
+    redacted
+}
+
+fn sensitive_flag_takes_value(arg: &str) -> bool {
+    let lower = arg.to_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "auth",
+        "apikey",
+        "api-key",
+        "api_key",
+        "access-key",
+        "access_key",
+        "_auth",
+    ]
+    .into_iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn redact_arg(arg: &str) -> String {
+    if !sensitive_flag_takes_value(arg) {
+        return redact_url_credentials(arg);
+    }
+    if let Some((key, _value)) = arg.split_once('=') {
+        format!("{key}=[redacted]")
+    } else if arg.starts_with('-') {
+        arg.to_string()
+    } else {
+        "[redacted]".to_string()
+    }
+}
+
+fn redact_url_credentials(arg: &str) -> String {
+    let Ok(mut url) = Url::parse(arg) else {
+        return arg.to_string();
+    };
+    if !url.username().is_empty() {
+        let _ = url.set_username("redacted");
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(Some("redacted"));
+    }
+    if url
+        .query_pairs()
+        .any(|(key, _)| sensitive_flag_takes_value(&key))
+    {
+        url.set_query(Some("redacted"));
+    }
+    url.to_string()
 }
 
 fn split_wrapper_args(raw_args: &[String]) -> Option<(&str, &[String])> {
@@ -774,6 +1065,11 @@ fn run_config_status(args: ConfigStatusArgs) -> i32 {
     println!(
         "autoUpdateSourceDb: {}",
         auto_update_source_db_enabled_with_config(&config)
+    );
+    println!("logInvocations: {}", config.log_invocations.unwrap_or(true));
+    println!(
+        "logDir: {}",
+        invocation_log_dir_with_config(&config).display()
     );
     println!(
         "sourceDbMaxAgeHours: {}",
@@ -1634,6 +1930,8 @@ fn default_config_file() -> UserConfig {
         auto_update_source_db: Some(true),
         allow_registry_hosts: Some(vec!["registry.npmjs.org".to_string()]),
         timeout_seconds: Some(20),
+        log_invocations: Some(true),
+        log_dir: Some(PathBuf::from("~/.mcaifee/logs")),
         cache_dir: Some(PathBuf::from("~/.mcaifee/cache")),
         source_db_path: None,
     }
@@ -5179,6 +5477,51 @@ mod tests {
     }
 
     #[test]
+    fn invocation_log_record_redacts_sensitive_args() {
+        let started_at = DateTime::parse_from_rfc3339("2026-05-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let finished_at = DateTime::parse_from_rfc3339("2026-05-29T00:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let args = vec![
+            "npm".to_string(),
+            "install".to_string(),
+            "--token".to_string(),
+            "secret-value".to_string(),
+            "--registry=https://user:pass@example.com/pkg?token=abc".to_string(),
+        ];
+
+        let record = invocation_log_record(&args, started_at, finished_at, 1000, 2);
+        let logged_args = record
+            .get("args")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap();
+
+        assert_eq!(
+            record.get("commandKind").and_then(Value::as_str),
+            Some("wrapper:npm")
+        );
+        assert_eq!(record.get("exitCode").and_then(Value::as_i64), Some(2));
+        assert_eq!(logged_args[2].as_str(), Some("--token"));
+        assert_eq!(logged_args[3].as_str(), Some("[redacted]"));
+        assert_eq!(logged_args[4].as_str(), Some("--registry=[redacted]"));
+    }
+
+    #[test]
+    fn redact_url_credentials_preserves_non_secret_urls() {
+        assert_eq!(
+            redact_url_credentials("https://user:pass@example.com/path?ok=1"),
+            "https://redacted:redacted@example.com/path?ok=1"
+        );
+        assert_eq!(
+            redact_url_credentials("https://example.com/path?token=abc"),
+            "https://example.com/path?redacted"
+        );
+    }
+
+    #[test]
     fn extracts_specs_after_package_manager_options() {
         let args = vec![
             "--prefix".to_string(),
@@ -5468,6 +5811,8 @@ mod tests {
             effective_policy_with_config(&config, None).minimum_version_age_hours,
             168
         );
+        assert_eq!(config.log_invocations, Some(true));
+        assert_eq!(config.log_dir, Some(PathBuf::from("~/.mcaifee/logs")));
         assert_eq!(
             effective_policy_with_config(&config, Some(0)).minimum_version_age_hours,
             0

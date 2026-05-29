@@ -92,6 +92,8 @@ Default config:
   "autoUpdateSourceDb": true,
   "allowRegistryHosts": ["registry.npmjs.org"],
   "timeoutSeconds": 20,
+  "logInvocations": true,
+  "logDir": "~/.mcaifee/logs",
   "cacheDir": "~/.mcaifee/cache",
   "sourceDbPath": null
 }
@@ -105,6 +107,21 @@ mcaifee npm install react --mcaifee-min-version-age-hours 72
 ```
 
 Set `minimumVersionAgeHours` to `0`, or pass `--min-version-age-hours 0`, to disable the publish-age gate for that scope.
+
+## Invocation Logs
+
+Mcaifee records one JSONL event per invocation in `~/.mcaifee/logs/` by default. The log includes command mode, redacted arguments, current working directory, executable path, process ID, start and finish timestamps, duration, exit code, and success state.
+
+Logs are best-effort: logging failures never block the dependency gate. Sensitive argument names such as tokens, passwords, credentials, auth values, API keys, and URL credentials are redacted before writing.
+
+Configuration:
+
+```bash
+MCAIFEE_LOG_INVOCATIONS=0 mcaifee npm install
+MCAIFEE_LOG_DIR=/tmp/mcaifee-logs mcaifee report
+```
+
+Or set `logInvocations` / `logDir` in `~/.mcaifee/config.json`.
 
 ## Wrapper Usage
 
