@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.5.0
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.5.1
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
 
@@ -90,6 +90,8 @@ Default config:
   "sourceDbMaxAgeHours": 24,
   "failOn": "medium",
   "autoUpdateSourceDb": true,
+  "allowRegistryHosts": ["registry.npmjs.org"],
+  "timeoutSeconds": 20,
   "cacheDir": "~/.mcaifee/cache",
   "sourceDbPath": null
 }
@@ -155,6 +157,8 @@ By default the wrapper blocks when findings reach `medium` severity. Override th
 ```bash
 mcaifee npm install --mcaifee-fail-on high
 mcaifee npm install --mcaifee-fail-on critical
+mcaifee npm install --mcaifee-allow-registry-host registry.example.com
+mcaifee npm install --mcaifee-timeout 45
 ```
 
 Or with an environment variable:
@@ -260,6 +264,8 @@ The Docker gate uses:
 - Dropped Linux capabilities.
 - `no-new-privileges`.
 - A read-only project mount.
+- A read-only container root filesystem.
+- A non-root user, dropped Linux capabilities, pids/memory/CPU limits, and writable tmpfs only for temporary work.
 - Fake canary credentials in common environment variables.
 - A temporary writable copy of the project inside the container.
 
@@ -286,14 +292,14 @@ Mcaifee currently checks:
 - Dependency specs: local paths, workspace/file specs, Git/SSH specs, HTTP specs, and broad ranges when `--strict-ranges` is enabled.
 - Lockfiles: transitive package names, install/build-script flags, tarball source hostnames, missing integrity/checksum signals, duplicate version fanout, and non-registry sources across npm, pnpm, Yarn, and Bun lockfiles.
 - Registry metadata in `--online` mode: deprecation, maintainers, package binaries, missing repository/license fields, large dependency fanout, new packages, and package versions newer than the configured minimum age.
-- Advisory audit in `--online` mode: `npm audit --json --package-lock-only` for npm lockfiles and `pnpm audit --json` for pnpm lockfiles, normalized into `cve_advisory` findings.
+- Advisory audit in `--online` mode: `npm audit --json --package-lock-only` for npm lockfiles, `pnpm audit --json` for pnpm lockfiles, and OSV batch lookups for lockfiles without native audit support.
 
 ## Data Sources
 
 The current binary performs local checks, lockfile analysis, local source database matching, optional npm registry metadata checks, npm/pnpm advisory audit checks, and optional Docker behavior checks. The report catalog names external feeds that should be used as corroborating evidence when reviewing npm risk:
 
 - npm audit advisory data, queried for npm/pnpm lockfiles in `--online` mode
-- OSV.dev
+- OSV.dev, queried for package/version pairs from supported non-npm lockfiles in `--online` mode
 - OpenSSF malicious-packages
 - GitHub Advisory Database
 - GitLab Advisory Database
@@ -341,7 +347,7 @@ The expected result is that `mcaifee npm install --mcaifee-fail-on medium` block
 
 ## CI And Release
 
-The release workflow builds Linux x86_64, macOS x86_64, and macOS arm64 binaries for version tags.
+The release workflow builds Linux x86_64, macOS x86_64, and macOS arm64 binaries for version tags. Release artifacts include SHA-256 checksums, keyless cosign blob signatures/certificates, and GitHub build provenance attestations.
 
 CI includes a focused lockfile parser matrix for `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`, source database import/matching regressions, plus a Docker fixture that verifies lifecycle-script malware is blocked before execution.
 
@@ -359,8 +365,8 @@ docker build -f Dockerfile.malicious-test .
 ## Limits
 
 - npm, pnpm, Yarn, and Bun text lockfiles are parsed for transitive package names, source URLs, integrity/checksum signals, and build-script flags when the lockfile format exposes them. npm lockfiles currently have the richest metadata coverage.
-- `--online` advisory audit currently supports npm `package-lock.json` / `npm-shrinkwrap.json` and `pnpm-lock.yaml`; Yarn and Bun lockfiles still rely on static lockfile analysis plus local source database matching.
+- `--online` advisory audit uses native npm/pnpm audit where available and OSV batch lookups for supported text lockfiles without native audit support.
 - `bun.lockb` is a legacy binary lockfile; Mcaifee detects it and requires migration to text `bun.lock` or generation of a Yarn-compatible lockfile for complete static review.
-- `mcaifee db update` imports OSV-style npm records, with OpenSSF malicious-packages as the default source. Other external advisory feeds are cataloged for review and corroboration; OSV direct API coverage is still a future integration.
+- `mcaifee db update` imports OSV-style npm records, with OpenSSF malicious-packages as the default source. Other external advisory feeds are cataloged for review and corroboration.
 - Paranoia mode depends on Docker availability.
 - Network-disabled paranoia mode can fail installs that need live registry access.
