@@ -432,6 +432,7 @@ struct DoctorOutput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum DoctorStatus {
+    Info,
     Pass,
     Warn,
     Fail,
@@ -440,6 +441,7 @@ enum DoctorStatus {
 impl DoctorStatus {
     fn as_str(self) -> &'static str {
         match self {
+            DoctorStatus::Info => "info",
             DoctorStatus::Pass => "pass",
             DoctorStatus::Warn => "warn",
             DoctorStatus::Fail => "fail",
@@ -1713,6 +1715,14 @@ fn write_default_config_file(config_path: &Path, config: &UserConfig) -> io::Res
 }
 
 impl DoctorCheck {
+    fn info(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorStatus::Info,
+            message: message.into(),
+        }
+    }
+
     fn pass(name: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1813,14 +1823,23 @@ fn source_database_check(config: &UserConfig) -> DoctorCheck {
 fn command_available_check(command: &str) -> DoctorCheck {
     match command_in_path(command) {
         Some(path) => DoctorCheck::pass(command, format!("found {}", path.display())),
-        None if command == "docker" => DoctorCheck::warn(
+        None => missing_command_check(command),
+    }
+}
+
+fn missing_command_check(command: &str) -> DoctorCheck {
+    if matches!(command, "npm" | "pnpm" | "yarn" | "bun") {
+        DoctorCheck::info(
+            command,
+            format!("not found in PATH; `{command}` wrapper commands are unavailable"),
+        )
+    } else if command == "docker" {
+        DoctorCheck::warn(
             command,
             "not found in PATH; paranoia mode is unavailable".to_string(),
-        ),
-        None => DoctorCheck::warn(
-            command,
-            format!("not found in PATH; `{command}` wrapper commands will not work"),
-        ),
+        )
+    } else {
+        DoctorCheck::warn(command, "not found in PATH".to_string())
     }
 }
 
@@ -7433,6 +7452,13 @@ packages:
     #[test]
     fn doctor_status_prioritizes_failures_then_warnings() {
         assert_eq!(
+            doctor_status(&[
+                DoctorCheck::pass("config", "ok"),
+                DoctorCheck::info("bun", "optional tool missing")
+            ]),
+            DoctorStatus::Pass
+        );
+        assert_eq!(
             doctor_status(&[DoctorCheck::pass("config", "ok")]),
             DoctorStatus::Pass
         );
@@ -7450,6 +7476,16 @@ packages:
             ]),
             DoctorStatus::Fail
         );
+    }
+
+    #[test]
+    fn missing_package_manager_tools_are_informational() {
+        let bun = missing_command_check("bun");
+        let docker = missing_command_check("docker");
+
+        assert_eq!(bun.status, DoctorStatus::Info);
+        assert!(bun.message.contains("wrapper commands are unavailable"));
+        assert_eq!(docker.status, DoctorStatus::Warn);
     }
 
     #[test]

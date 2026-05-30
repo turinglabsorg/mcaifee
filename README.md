@@ -184,7 +184,7 @@ mcaifee doctor --fix
 mcaifee doctor --fix --online
 ```
 
-The health check covers config parsing, the active executable, cache/log directory writability, source database freshness, and the presence of `npm`, `pnpm`, `yarn`, `bun`, and `docker` on `PATH`. Warnings do not fail by default; `--strict` exits non-zero when warnings are present.
+The health check covers config parsing, the active executable, cache/log directory writability, source database freshness, and the presence of `npm`, `pnpm`, `yarn`, `bun`, and `docker` on `PATH`. Missing package-manager binaries are informational because each wrapper is optional; missing Docker remains a warning because paranoia mode depends on it. Warnings do not fail by default; `--strict` exits non-zero when warnings are present.
 
 `--fix` creates missing config, cache, and log directories using local defaults. Add `--online` only when the command may refresh the OpenSSF malicious package source database from the network.
 
@@ -435,7 +435,7 @@ The expected result is that `mcaifee npm install --mcaifee-fail-on medium` block
 
 The release workflow builds Linux x86_64, macOS x86_64, and macOS arm64 binaries for version tags. Release artifacts include SHA-256 checksums, keyless cosign blob signatures/certificates, and GitHub build provenance attestations.
 
-CI includes a focused lockfile parser matrix for `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`, source database import/matching regressions, plus a Docker fixture that verifies lifecycle-script malware is blocked before execution.
+CI includes a focused lockfile parser matrix for `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`, source database import/matching regressions, SARIF upload to GitHub code scanning, plus a Docker fixture that verifies lifecycle-script malware is blocked before execution.
 
 Local validation:
 

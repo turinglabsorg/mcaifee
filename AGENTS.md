@@ -18,7 +18,7 @@
 - Shell integration supports `mcaifee shell-init`, `mcaifee shell-disable`, and `mcaifee shell-status` so plain `npm`, `pnpm`, `yarn`, and `bun` calls can be wrapped in the current shell.
 - Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, `--output`, `--sarif`, gate decisions, grouped finding summaries, and advisory package rollups.
 - Invocation logs live under `~/.mcaifee/logs/` by default, are retained for 30 days by default, and can be inspected or pruned with `mcaifee logs status`, `mcaifee logs tail`, and `mcaifee logs prune`.
-- `mcaifee doctor` checks config parsing, the active executable, cache/log writability, source DB freshness, and package-manager/Docker availability; `mcaifee doctor --fix` creates missing local config/cache/log state and `--fix --online` may refresh the source database.
+- `mcaifee doctor` checks config parsing, the active executable, cache/log writability, source DB freshness, and package-manager/Docker availability; missing package-manager binaries are informational, missing Docker remains a warning, and `mcaifee doctor --fix` creates missing local config/cache/log state.
 - `--paranoia` or `MCAIFEE_PARANOIA=1` runs an extra Docker install simulation with network disabled by default, fake canary credentials, dropped capabilities, and a read-only project mount.
 - Wrapper logs print an ASCII Mcaifee banner before gated package-manager commands.
 
@@ -38,7 +38,7 @@
 ## Validation
 
 - Rust validation: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and `cargo build --release --locked`.
-- Runtime smoke validation: `mcaifee --help`, `mcaifee scan --help`, `mcaifee doctor`, `mcaifee doctor --fix`, `mcaifee report --format json --output /tmp/mcaifee-report.json --sarif /tmp/mcaifee-report.sarif`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
+- Runtime smoke validation: `mcaifee --help`, `mcaifee scan --help`, `mcaifee doctor`, `mcaifee doctor --fix`, `mcaifee report --format json --output /tmp/mcaifee-report.json --sarif /tmp/mcaifee-report.sarif`, SARIF upload in CI, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
 - Installer validation: `./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run`.
 - Distribution metadata validation: `sh -n install.sh` and `ruby -c Formula/mcaifee.rb`.
 - Skill validation: `quick_validate.py` against the skill root.
