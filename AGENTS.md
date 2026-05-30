@@ -42,6 +42,7 @@
 - Installer validation: `./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run`.
 - Distribution metadata validation: `sh -n install.sh` and `ruby -c Formula/mcaifee.rb`.
 - Skill validation: `quick_validate.py` against the skill root.
+- Bun wrapper fixture: `docker build -f Dockerfile.bun-test .`.
 - Malicious npm gate test: `docker build -f Dockerfile.malicious-test .`.
 - Lockfile parser CI: `.github/workflows/ci.yml` runs a focused matrix for npm package lock, npm shrinkwrap v1, pnpm, Yarn, Bun text lock, and Bun binary lock detection.
 - Source DB validation: unit tests cover OSV import, package-lock exact version matching, and the 24-hour wrapper refresh window.

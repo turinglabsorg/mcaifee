@@ -1,0 +1,25 @@
+FROM rust:1-bookworm AS builder
+
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked
+
+FROM oven/bun:1 AS bun-wrapper-test
+
+COPY --from=builder /src/target/release/mcaifee /usr/local/bin/mcaifee
+ENV MCAIFEE_DB_AUTO_UPDATE=0
+ENV MCAIFEE_LOG_DIR=/tmp/mcaifee-logs
+
+RUN mcaifee --version \
+  && bun --version \
+  && mcaifee doctor | tee /tmp/mcaifee-doctor.txt \
+  && grep '\[pass\] bun: found' /tmp/mcaifee-doctor.txt
+
+WORKDIR /app
+RUN printf '%s\n' \
+  '{"name":"bun-smoke","version":"1.0.0","dependencies":{"is-number":"7.0.0"}}' \
+  > package.json \
+  && mcaifee bun install --mcaifee-fail-on high \
+  && test -f bun.lock \
+  && test -s /tmp/mcaifee-logs/$(ls /tmp/mcaifee-logs | tail -n 1) \
+  && bun -e 'const isNumber = require("is-number"); if (!isNumber(42)) process.exit(1);'

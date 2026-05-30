@@ -435,7 +435,7 @@ The expected result is that `mcaifee npm install --mcaifee-fail-on medium` block
 
 The release workflow builds Linux x86_64, macOS x86_64, and macOS arm64 binaries for version tags. Release artifacts include SHA-256 checksums, keyless cosign blob signatures/certificates, and GitHub build provenance attestations.
 
-CI includes a focused lockfile parser matrix for `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`, source database import/matching regressions, SARIF upload to GitHub code scanning, plus a Docker fixture that verifies lifecycle-script malware is blocked before execution.
+CI includes a focused lockfile parser matrix for `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`, source database import/matching regressions, SARIF upload to GitHub code scanning, a Bun wrapper Docker fixture, plus a Docker fixture that verifies lifecycle-script malware is blocked before execution.
 
 Local validation:
 
@@ -448,6 +448,7 @@ sh -n install.sh
 ruby -c Formula/mcaifee.rb
 ./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run
 ./target/release/mcaifee report reactt --format json --output /tmp/mcaifee-report.json --sarif /tmp/mcaifee-report.sarif
+docker build -f Dockerfile.bun-test .
 docker build -f Dockerfile.malicious-test .
 ```
 

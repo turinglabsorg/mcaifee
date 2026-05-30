@@ -82,6 +82,15 @@ jobs:
       - name: Docker fixture blocks lifecycle malware
         run: docker build -f Dockerfile.malicious-test .
 
+  bun-wrapper:
+    name: bun wrapper fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker fixture runs Mcaifee with Bun
+        run: docker build -f Dockerfile.bun-test .
+
   source-db:
     name: source database
     runs-on: ubuntu-latest
