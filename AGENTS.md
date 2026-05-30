@@ -8,6 +8,7 @@
 - `mcaifee db update` builds a local OSV-style source database, defaulting to OpenSSF `malicious-packages`; scans emit `source_db_match` findings for exact package/version matches.
 - Top-level `mcaifee --help` lists operational subcommands while preserving legacy bare scanner usage such as `mcaifee react@18.2.0`.
 - User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
+- Policy profiles `balanced`, `strict`, `ci`, and `paranoid` provide default publish-age, source DB freshness, fail threshold, timeout, and log retention settings for `mcaifee config init --profile <profile>`.
 - The default publish-age policy flags package versions newer than 7 days; override with `minimumVersionAgeHours`, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or `--mcaifee-min-version-age-hours`.
 - Wrapper mode auto-updates the default source database before gated installs when it is missing or older than 24 hours; set `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned tests.
 - `--online` uses `npm view` for registry metadata and npm/pnpm advisory audit for supported lockfiles without executing package code.
@@ -15,9 +16,9 @@
 - Wrapper mode supports `mcaifee npm ...`, `mcaifee pnpm ...`, `mcaifee yarn ...`, and `mcaifee bun ...`.
 - Internal npm staging and npm registry metadata calls use an isolated temporary npm cache/log directory so user `~/.npm` permission problems do not affect the gate.
 - Shell integration supports `mcaifee shell-init`, `mcaifee shell-disable`, and `mcaifee shell-status` so plain `npm`, `pnpm`, `yarn`, and `bun` calls can be wrapped in the current shell.
-- Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, gate decisions, grouped finding summaries, and advisory package rollups.
+- Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, `--output`, `--sarif`, gate decisions, grouped finding summaries, and advisory package rollups.
 - Invocation logs live under `~/.mcaifee/logs/` by default, are retained for 30 days by default, and can be inspected or pruned with `mcaifee logs status`, `mcaifee logs tail`, and `mcaifee logs prune`.
-- `mcaifee doctor` checks config parsing, the active executable, cache/log writability, source DB freshness, and package-manager/Docker availability.
+- `mcaifee doctor` checks config parsing, the active executable, cache/log writability, source DB freshness, and package-manager/Docker availability; `mcaifee doctor --fix` creates missing local config/cache/log state and `--fix --online` may refresh the source database.
 - `--paranoia` or `MCAIFEE_PARANOIA=1` runs an extra Docker install simulation with network disabled by default, fake canary credentials, dropped capabilities, and a read-only project mount.
 - Wrapper logs print an ASCII Mcaifee banner before gated package-manager commands.
 
@@ -30,14 +31,16 @@
 
 - GitHub Releases are built by `.github/workflows/release.yml` on `v*` tags.
 - Release assets target Linux x86_64, macOS x86_64, and macOS Apple Silicon.
-- `install.sh` installs the correct release asset for Linux/macOS x86_64/arm64, supports custom install directories, local source smoke tests, and optional shell-init guidance.
+- `install.sh` installs the correct release asset for Linux/macOS x86_64/arm64, verifies downloaded release assets with SHA-256 by default, optionally verifies cosign signatures, supports custom install directories, local source smoke tests, and optional shell-init guidance.
 - `install.sh --shell-init <shell>` installs a persistent shell startup block; `--shell-disable <shell>` removes it.
+- `Formula/mcaifee.rb` is a local Homebrew formula for the latest published release asset checksums.
 
 ## Validation
 
 - Rust validation: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and `cargo build --release --locked`.
-- Runtime smoke validation: `mcaifee --help`, `mcaifee scan --help`, `mcaifee doctor`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
+- Runtime smoke validation: `mcaifee --help`, `mcaifee scan --help`, `mcaifee doctor`, `mcaifee doctor --fix`, `mcaifee report --format json --output /tmp/mcaifee-report.json --sarif /tmp/mcaifee-report.sarif`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
 - Installer validation: `./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run`.
+- Distribution metadata validation: `sh -n install.sh` and `ruby -c Formula/mcaifee.rb`.
 - Skill validation: `quick_validate.py` against the skill root.
 - Malicious npm gate test: `docker build -f Dockerfile.malicious-test .`.
 - Lockfile parser CI: `.github/workflows/ci.yml` runs a focused matrix for npm package lock, npm shrinkwrap v1, pnpm, Yarn, Bun text lock, and Bun binary lock detection.

@@ -17,6 +17,12 @@ use std::thread;
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 
+mod cli;
+
+use cli::{
+    args_with_program, named_cli_command, should_render_top_level_cli, NamedCliCommand, TopLevelCli,
+};
+
 const MCAIFEE_ASCII: &str = r#"
  __  __  ____    _    ___ _____ _____ _____
 |  \/  |/ ___|  / \  |_ _|  ___| ____| ____|
@@ -80,42 +86,6 @@ struct ScanArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "mcaifee",
-    version,
-    about = "Pre-install npm, pnpm, Yarn, and Bun malware gate.",
-    after_help = "Compatibility: `mcaifee <package-spec>` and `mcaifee --lockfile <path>` still run scan mode. Package-manager wrappers use `mcaifee npm|pnpm|yarn|bun ...`."
-)]
-struct TopLevelCli {
-    #[command(subcommand)]
-    command: Option<TopLevelCommand>,
-}
-
-#[derive(Subcommand, Debug)]
-enum TopLevelCommand {
-    #[command(about = "Scan package specs, package.json manifests, and lockfiles")]
-    Scan,
-    #[command(about = "Generate a full dependency risk report")]
-    Report,
-    #[command(about = "Alias of report")]
-    Audit,
-    #[command(about = "Update or inspect the local malicious package source database")]
-    Db,
-    #[command(about = "Create or inspect user policy configuration")]
-    Config,
-    #[command(about = "Inspect, tail, or prune invocation logs")]
-    Logs,
-    #[command(about = "Check local config, cache, logs, source DB, and tool availability")]
-    Doctor,
-    #[command(about = "Print shell functions that wrap package managers")]
-    ShellInit,
-    #[command(about = "Print shell commands that disable wrapper functions")]
-    ShellDisable,
-    #[command(about = "Show whether the current shell has the Mcaifee marker")]
-    ShellStatus,
-}
-
-#[derive(Parser, Debug)]
 struct ReportArgs {
     #[arg(help = "npm package specs such as react@18.2.0 or @scope/pkg@1.0.0")]
     targets: Vec<String>,
@@ -135,6 +105,12 @@ struct ReportArgs {
 
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+
+    #[arg(long, value_name = "PATH", help = "Write the report output to a file")]
+    output: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH", help = "Write findings as SARIF 2.1.0")]
+    sarif: Option<PathBuf>,
 
     #[arg(long, help = "Include notes about the Docker paranoia simulation")]
     paranoia: bool,
@@ -218,6 +194,9 @@ struct ConfigInitArgs {
     #[arg(long, value_name = "PATH")]
     path: Option<PathBuf>,
 
+    #[arg(long, value_enum, default_value_t = PolicyProfile::Balanced)]
+    profile: PolicyProfile,
+
     #[arg(long, help = "Overwrite an existing config file")]
     force: bool,
 }
@@ -278,6 +257,18 @@ struct DoctorArgs {
 
     #[arg(long, help = "Exit non-zero when warnings are present")]
     strict: bool,
+
+    #[arg(
+        long,
+        help = "Create missing local config/cache/log state where possible"
+    )]
+    fix: bool,
+
+    #[arg(
+        long,
+        help = "Allow --fix to refresh the source database from the network"
+    )]
+    online: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -304,6 +295,63 @@ enum ShellKind {
 enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum PolicyProfile {
+    Balanced,
+    Strict,
+    Ci,
+    Paranoid,
+}
+
+impl PolicyProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            PolicyProfile::Balanced => "balanced",
+            PolicyProfile::Strict => "strict",
+            PolicyProfile::Ci => "ci",
+            PolicyProfile::Paranoid => "paranoid",
+        }
+    }
+
+    fn defaults(self) -> PolicyProfileDefaults {
+        match self {
+            PolicyProfile::Balanced => PolicyProfileDefaults {
+                minimum_version_age_hours: DEFAULT_MINIMUM_VERSION_AGE_HOURS,
+                source_db_max_age_hours: DEFAULT_SOURCE_DB_MAX_AGE_HOURS,
+                fail_on: Severity::Medium,
+                auto_update_source_db: true,
+                timeout_seconds: 20,
+                log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
+            },
+            PolicyProfile::Strict => PolicyProfileDefaults {
+                minimum_version_age_hours: DEFAULT_MINIMUM_VERSION_AGE_HOURS * 2,
+                source_db_max_age_hours: 12,
+                fail_on: Severity::Medium,
+                auto_update_source_db: true,
+                timeout_seconds: 30,
+                log_retention_days: 60,
+            },
+            PolicyProfile::Ci => PolicyProfileDefaults {
+                minimum_version_age_hours: 168,
+                source_db_max_age_hours: 24,
+                fail_on: Severity::Medium,
+                auto_update_source_db: true,
+                timeout_seconds: 30,
+                log_retention_days: 14,
+            },
+            PolicyProfile::Paranoid => PolicyProfileDefaults {
+                minimum_version_age_hours: 720,
+                source_db_max_age_hours: 6,
+                fail_on: Severity::Low,
+                auto_update_source_db: true,
+                timeout_seconds: 45,
+                log_retention_days: 90,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -377,6 +425,7 @@ struct ReportOutput {
 struct DoctorOutput {
     tool: &'static str,
     status: DoctorStatus,
+    fixes: Vec<String>,
     checks: Vec<DoctorCheck>,
 }
 
@@ -508,6 +557,7 @@ struct SourceDbRecord {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UserConfig {
+    policy_profile: Option<PolicyProfile>,
     minimum_version_age_hours: Option<i64>,
     source_db_max_age_hours: Option<i64>,
     fail_on: Option<Severity>,
@@ -524,6 +574,16 @@ struct UserConfig {
 #[derive(Clone, Copy, Debug)]
 struct Policy {
     minimum_version_age_hours: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PolicyProfileDefaults {
+    minimum_version_age_hours: i64,
+    source_db_max_age_hours: i64,
+    fail_on: Severity,
+    auto_update_source_db: bool,
+    timeout_seconds: u64,
+    log_retention_days: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -744,26 +804,6 @@ fn run_cli(raw_args: &[String]) -> i32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NamedCliCommand {
-    Scan,
-    ShellInit,
-    ShellDisable,
-    ShellStatus,
-    Db,
-    Config,
-    Doctor,
-    Logs,
-    Report,
-}
-
-fn should_render_top_level_cli(raw_args: &[String]) -> bool {
-    raw_args.is_empty()
-        || raw_args.first().is_some_and(|arg| {
-            matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help")
-        })
-}
-
 fn run_top_level_cli(cli: TopLevelCli) -> i32 {
     if cli.command.is_none() {
         let mut command = TopLevelCli::command();
@@ -773,21 +813,6 @@ fn run_top_level_cli(cli: TopLevelCli) -> i32 {
         println!();
     }
     0
-}
-
-fn named_cli_command(command: &str) -> Option<NamedCliCommand> {
-    match command {
-        "scan" => Some(NamedCliCommand::Scan),
-        "shell-init" => Some(NamedCliCommand::ShellInit),
-        "shell-disable" => Some(NamedCliCommand::ShellDisable),
-        "shell-status" => Some(NamedCliCommand::ShellStatus),
-        "db" => Some(NamedCliCommand::Db),
-        "config" => Some(NamedCliCommand::Config),
-        "doctor" => Some(NamedCliCommand::Doctor),
-        "logs" => Some(NamedCliCommand::Logs),
-        "report" | "audit" => Some(NamedCliCommand::Report),
-        _ => None,
-    }
 }
 
 fn run_named_cli_command(command: NamedCliCommand, command_args: &[String]) -> i32 {
@@ -850,13 +875,6 @@ fn run_named_cli_command(command: NamedCliCommand, command_args: &[String]) -> i
             Err(status) => status,
         },
     }
-}
-
-fn args_with_program(program: &str, args: &[String]) -> Vec<String> {
-    let mut parsed_args = Vec::with_capacity(args.len() + 1);
-    parsed_args.push(program.to_string());
-    parsed_args.extend(args.iter().cloned());
-    parsed_args
 }
 
 fn parse_cli_args<T>(result: Result<T, clap::Error>) -> Result<T, i32> {
@@ -953,11 +971,12 @@ fn log_retention_days() -> i64 {
 }
 
 fn log_retention_days_with_config(config: &UserConfig) -> i64 {
+    let profile = policy_profile_defaults_with_config(config);
     env::var("MCAIFEE_LOG_RETENTION_DAYS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .or(config.log_retention_days)
-        .unwrap_or(DEFAULT_LOG_RETENTION_DAYS)
+        .unwrap_or(profile.log_retention_days)
         .max(0)
 }
 
@@ -1368,7 +1387,18 @@ fn run_logs(args: LogsArgs) -> i32 {
 }
 
 fn run_doctor(args: DoctorArgs) -> i32 {
-    let output = doctor_output();
+    let fixes = if args.fix {
+        match apply_doctor_fixes(args.online) {
+            Ok(fixes) => fixes,
+            Err(error) => {
+                eprintln!("mcaifee: doctor fix failed: {error}");
+                return 1;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let output = doctor_output(fixes);
     match args.format {
         OutputFormat::Json => {
             println!(
@@ -1394,21 +1424,8 @@ fn run_config_init(args: ConfigInitArgs) -> i32 {
         );
         return 1;
     }
-    if let Some(parent) = config_path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            eprintln!("mcaifee: could not create {}: {error}", parent.display());
-            return 1;
-        }
-    }
-    let config = default_config_file();
-    let encoded = match serde_json::to_vec_pretty(&config) {
-        Ok(encoded) => encoded,
-        Err(error) => {
-            eprintln!("mcaifee: could not serialize config: {error}");
-            return 1;
-        }
-    };
-    if let Err(error) = fs::write(&config_path, encoded) {
+    let config = default_config_file_for_profile(args.profile);
+    if let Err(error) = write_default_config_file(&config_path, &config) {
         eprintln!(
             "mcaifee: could not write {}: {error}",
             config_path.display()
@@ -1417,6 +1434,7 @@ fn run_config_init(args: ConfigInitArgs) -> i32 {
     }
     println!("mcaifee config init");
     println!("config: {}", config_path.display());
+    println!("policyProfile: {}", args.profile.as_str());
     0
 }
 
@@ -1427,6 +1445,10 @@ fn run_config_status(args: ConfigStatusArgs) -> i32 {
     println!("exists: {}", config_path.exists());
 
     let config = read_config_file(&config_path).unwrap_or_default();
+    println!(
+        "policyProfile: {}",
+        policy_profile_with_config(&config).as_str()
+    );
     let policy = effective_policy_with_config(&config, None);
     println!(
         "minimumVersionAgeHours: {}",
@@ -1574,7 +1596,7 @@ fn run_logs_prune(args: LogsPruneArgs) -> i32 {
     0
 }
 
-fn doctor_output() -> DoctorOutput {
+fn doctor_output(fixes: Vec<String>) -> DoctorOutput {
     let config_path = default_config_path();
     let (config, config_check) = match read_config_file(&config_path) {
         Ok(config) => (
@@ -1628,8 +1650,66 @@ fn doctor_output() -> DoctorOutput {
     DoctorOutput {
         tool: "mcaifee",
         status: doctor_status(&checks),
+        fixes,
         checks,
     }
+}
+
+fn apply_doctor_fixes(online: bool) -> io::Result<Vec<String>> {
+    let mut fixes = Vec::new();
+    let config_path = default_config_path();
+    let config = match read_config_file(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_default_config_file(&config_path, &default_config_file())?;
+            fixes.push(format!("created config {}", config_path.display()));
+            default_config_file()
+        }
+        Err(error) => return Err(error),
+    };
+
+    let cache_dir = default_cache_dir_with_config(&config);
+    fs::create_dir_all(&cache_dir)?;
+    fixes.push(format!("ensured cacheDir {}", cache_dir.display()));
+
+    if invocation_logging_enabled_with_config(&config) {
+        let log_dir = invocation_log_dir_with_config(&config);
+        fs::create_dir_all(&log_dir)?;
+        #[cfg(unix)]
+        {
+            let _ = fs::set_permissions(&log_dir, fs::Permissions::from_mode(0o700));
+        }
+        fixes.push(format!("ensured logDir {}", log_dir.display()));
+    }
+
+    if online {
+        let source_db = default_source_db_path_with_config(&config);
+        if source_db_needs_update(
+            &source_db,
+            Duration::hours(source_db_max_age_hours_with_config(&config)),
+        ) {
+            let status = run_db_update(DbUpdateArgs {
+                source: None,
+                db: Some(source_db.clone()),
+                repo: "https://github.com/ossf/malicious-packages".to_string(),
+                source_name: "OpenSSF malicious-packages".to_string(),
+            });
+            if status != 0 {
+                return Err(io::Error::other("source database update failed"));
+            }
+            fixes.push(format!("updated sourceDb {}", source_db.display()));
+        }
+    }
+
+    Ok(fixes)
+}
+
+fn write_default_config_file(config_path: &Path, config: &UserConfig) -> io::Result<()> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let encoded = serde_json::to_vec_pretty(config).map_err(io::Error::other)?;
+    fs::write(config_path, encoded)
 }
 
 impl DoctorCheck {
@@ -1786,6 +1866,9 @@ fn render_doctor_text(output: &DoctorOutput) -> String {
         "mcaifee doctor".to_string(),
         format!("status: {}", output.status.as_str()),
     ];
+    for fix in &output.fixes {
+        lines.push(format!("fix: {fix}"));
+    }
     for check in &output.checks {
         lines.push(format!(
             "[{}] {}: {}",
@@ -2059,17 +2142,19 @@ fn find_command_index(package_manager_args: &[String]) -> Option<usize> {
 }
 
 fn fail_threshold_with_config(config: &UserConfig) -> Severity {
+    let profile = policy_profile_defaults_with_config(config);
     env::var("MCAIFEE_FAIL_ON")
         .ok()
         .and_then(|value| parse_severity(&value))
         .or(config.fail_on)
-        .unwrap_or(Severity::Medium)
+        .unwrap_or(profile.fail_on)
 }
 
 fn effective_policy_with_config(
     config: &UserConfig,
     min_version_age_hours_override: Option<i64>,
 ) -> Policy {
+    let profile = policy_profile_defaults_with_config(config);
     let minimum_version_age_hours = min_version_age_hours_override
         .or_else(|| {
             env::var("MCAIFEE_MIN_VERSION_AGE_HOURS")
@@ -2077,7 +2162,7 @@ fn effective_policy_with_config(
                 .and_then(|value| value.parse::<i64>().ok())
         })
         .or(config.minimum_version_age_hours)
-        .unwrap_or(DEFAULT_MINIMUM_VERSION_AGE_HOURS)
+        .unwrap_or(profile.minimum_version_age_hours)
         .max(0);
 
     Policy {
@@ -2090,11 +2175,12 @@ fn source_db_max_age_hours() -> i64 {
 }
 
 fn source_db_max_age_hours_with_config(config: &UserConfig) -> i64 {
+    let profile = policy_profile_defaults_with_config(config);
     env::var("MCAIFEE_SOURCE_DB_MAX_AGE_HOURS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .or(config.source_db_max_age_hours)
-        .unwrap_or(DEFAULT_SOURCE_DB_MAX_AGE_HOURS)
+        .unwrap_or(profile.source_db_max_age_hours)
         .max(1)
 }
 
@@ -2103,6 +2189,7 @@ fn auto_update_source_db_enabled() -> bool {
 }
 
 fn auto_update_source_db_enabled_with_config(config: &UserConfig) -> bool {
+    let profile = policy_profile_defaults_with_config(config);
     env::var("MCAIFEE_DB_AUTO_UPDATE")
         .map(|value| {
             !matches!(
@@ -2110,7 +2197,11 @@ fn auto_update_source_db_enabled_with_config(config: &UserConfig) -> bool {
                 "0" | "false" | "False" | "FALSE" | "no" | "NO"
             )
         })
-        .unwrap_or_else(|_| config.auto_update_source_db.unwrap_or(true))
+        .unwrap_or_else(|_| {
+            config
+                .auto_update_source_db
+                .unwrap_or(profile.auto_update_source_db)
+        })
 }
 
 fn allowed_registry_hosts_with_config(config: &UserConfig, overrides: &[String]) -> Vec<String> {
@@ -2143,6 +2234,7 @@ fn split_registry_hosts(value: &str) -> Vec<String> {
 }
 
 fn timeout_seconds_with_config(config: &UserConfig, override_seconds: Option<u64>) -> u64 {
+    let profile = policy_profile_defaults_with_config(config);
     override_seconds
         .or_else(|| {
             env::var("MCAIFEE_TIMEOUT")
@@ -2150,8 +2242,30 @@ fn timeout_seconds_with_config(config: &UserConfig, override_seconds: Option<u64
                 .and_then(|value| value.parse::<u64>().ok())
         })
         .or(config.timeout_seconds)
-        .unwrap_or(20)
+        .unwrap_or(profile.timeout_seconds)
         .max(1)
+}
+
+fn policy_profile_with_config(config: &UserConfig) -> PolicyProfile {
+    env::var("MCAIFEE_POLICY_PROFILE")
+        .ok()
+        .and_then(|value| parse_policy_profile(&value))
+        .or(config.policy_profile)
+        .unwrap_or(PolicyProfile::Balanced)
+}
+
+fn policy_profile_defaults_with_config(config: &UserConfig) -> PolicyProfileDefaults {
+    policy_profile_with_config(config).defaults()
+}
+
+fn parse_policy_profile(value: &str) -> Option<PolicyProfile> {
+    match value.to_lowercase().as_str() {
+        "balanced" => Some(PolicyProfile::Balanced),
+        "strict" => Some(PolicyProfile::Strict),
+        "ci" => Some(PolicyProfile::Ci),
+        "paranoid" => Some(PolicyProfile::Paranoid),
+        _ => None,
+    }
 }
 
 fn parse_severity(value: &str) -> Option<Severity> {
@@ -2626,16 +2740,22 @@ fn default_config_path() -> PathBuf {
 }
 
 fn default_config_file() -> UserConfig {
+    default_config_file_for_profile(PolicyProfile::Balanced)
+}
+
+fn default_config_file_for_profile(profile: PolicyProfile) -> UserConfig {
+    let defaults = profile.defaults();
     UserConfig {
-        minimum_version_age_hours: Some(DEFAULT_MINIMUM_VERSION_AGE_HOURS),
-        source_db_max_age_hours: Some(DEFAULT_SOURCE_DB_MAX_AGE_HOURS),
-        fail_on: Some(Severity::Medium),
-        auto_update_source_db: Some(true),
+        policy_profile: Some(profile),
+        minimum_version_age_hours: Some(defaults.minimum_version_age_hours),
+        source_db_max_age_hours: Some(defaults.source_db_max_age_hours),
+        fail_on: Some(defaults.fail_on),
+        auto_update_source_db: Some(defaults.auto_update_source_db),
         allow_registry_hosts: Some(vec!["registry.npmjs.org".to_string()]),
-        timeout_seconds: Some(20),
+        timeout_seconds: Some(defaults.timeout_seconds),
         log_invocations: Some(true),
         log_dir: Some(PathBuf::from("~/.mcaifee/logs")),
-        log_retention_days: Some(DEFAULT_LOG_RETENTION_DAYS),
+        log_retention_days: Some(defaults.log_retention_days),
         cache_dir: Some(PathBuf::from("~/.mcaifee/cache")),
         source_db_path: None,
     }
@@ -3233,18 +3353,126 @@ fn run_report(args: ReportArgs) -> i32 {
         }),
     };
 
-    match args.format {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report).expect("serialize report")
+    if let Some(path) = &args.sarif {
+        if let Err(error) = write_report_sarif(&report, path) {
+            eprintln!("mcaifee: could not write SARIF {}: {error}", path.display());
+            return 1;
+        }
+        eprintln!("mcaifee: wrote SARIF {}", path.display());
+    }
+
+    let rendered = match args.format {
+        OutputFormat::Json => serde_json::to_string_pretty(&report).expect("serialize report"),
+        OutputFormat::Text => render_report_text(&report),
+    };
+    if let Some(path) = &args.output {
+        if let Err(error) = write_report_output(path, &rendered) {
+            eprintln!(
+                "mcaifee: could not write report {}: {error}",
+                path.display()
             );
+            return 1;
         }
-        OutputFormat::Text => {
-            println!("{}", render_report_text(&report));
-        }
+        println!("mcaifee: wrote report {}", path.display());
+    } else {
+        println!("{rendered}");
     }
     0
+}
+
+fn write_report_output(path: &Path, rendered: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, rendered)
+}
+
+fn write_report_sarif(report: &ReportOutput, path: &Path) -> io::Result<()> {
+    let sarif = report_sarif(report);
+    let encoded = serde_json::to_vec_pretty(&sarif).map_err(io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, encoded)
+}
+
+fn report_sarif(report: &ReportOutput) -> Value {
+    let rules = report
+        .finding_groups
+        .iter()
+        .map(|group| {
+            serde_json::json!({
+                "id": group.code,
+                "name": group.code,
+                "shortDescription": {
+                    "text": format!("Mcaifee {}", group.code)
+                },
+                "properties": {
+                    "category": group.category,
+                    "highestRisk": group.highest_risk
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = report
+        .findings
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "ruleId": finding.code,
+                "level": sarif_level(finding.severity),
+                "message": {
+                    "text": finding.message
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": finding.target
+                        }
+                    }
+                }],
+                "properties": {
+                    "severity": finding.severity.as_str(),
+                    "target": finding.target,
+                    "evidence": finding.evidence
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "mcaifee",
+                    "informationUri": "https://github.com/turinglabsorg/mcaifee",
+                    "rules": rules
+                }
+            },
+            "invocations": [{
+                "executionSuccessful": true,
+                "properties": {
+                    "decision": report.decision.as_str(),
+                    "highestRisk": report.highest_risk
+                }
+            }],
+            "results": results
+        }]
+    })
+}
+
+fn sarif_level(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical | Severity::High => "error",
+        Severity::Medium => "warning",
+        Severity::Low | Severity::Info => "note",
+    }
 }
 
 fn summarize_package_json(path: &PathBuf) -> Option<ManifestSummary> {
@@ -6377,14 +6605,139 @@ mod tests {
             "mcaifee report",
             "--format",
             "json",
+            "--output",
+            "report.json",
+            "--sarif",
+            "report.sarif",
             "--paranoia",
             "reactt",
         ])
         .unwrap();
 
         assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.output, Some(PathBuf::from("report.json")));
+        assert_eq!(args.sarif, Some(PathBuf::from("report.sarif")));
         assert!(args.paranoia);
         assert_eq!(args.targets, vec!["reactt".to_string()]);
+    }
+
+    #[test]
+    fn doctor_args_parse_fix_and_online_flags() {
+        let args = DoctorArgs::try_parse_from(["mcaifee doctor", "--fix", "--online"]).unwrap();
+
+        assert!(args.fix);
+        assert!(args.online);
+    }
+
+    #[test]
+    fn config_init_args_parse_policy_profile() {
+        let args = ConfigArgs::try_parse_from([
+            "mcaifee config",
+            "init",
+            "--profile",
+            "strict",
+            "--path",
+            "config.json",
+        ])
+        .unwrap();
+
+        let ConfigCommand::Init(init_args) = args.command else {
+            panic!("expected config init command");
+        };
+        assert_eq!(init_args.profile, PolicyProfile::Strict);
+        assert_eq!(init_args.path, Some(PathBuf::from("config.json")));
+    }
+
+    #[test]
+    fn policy_profiles_supply_expected_defaults() {
+        let balanced = default_config_file_for_profile(PolicyProfile::Balanced);
+        let strict = default_config_file_for_profile(PolicyProfile::Strict);
+        let ci = default_config_file_for_profile(PolicyProfile::Ci);
+        let paranoid = default_config_file_for_profile(PolicyProfile::Paranoid);
+
+        assert_eq!(balanced.policy_profile, Some(PolicyProfile::Balanced));
+        assert_eq!(
+            strict.minimum_version_age_hours,
+            Some(DEFAULT_MINIMUM_VERSION_AGE_HOURS * 2)
+        );
+        assert_eq!(ci.log_retention_days, Some(14));
+        assert_eq!(paranoid.fail_on, Some(Severity::Low));
+        assert_eq!(source_db_max_age_hours_with_config(&paranoid), 6);
+        assert_eq!(timeout_seconds_with_config(&paranoid, None), 45);
+        assert_eq!(log_retention_days_with_config(&paranoid), 90);
+    }
+
+    #[test]
+    fn write_default_config_file_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nested").join("config.json");
+
+        write_default_config_file(
+            &config_path,
+            &default_config_file_for_profile(PolicyProfile::Ci),
+        )
+        .unwrap();
+
+        let config = read_config_file(&config_path).unwrap();
+        assert_eq!(config.policy_profile, Some(PolicyProfile::Ci));
+        assert_eq!(config.log_retention_days, Some(14));
+    }
+
+    #[test]
+    fn report_sarif_maps_findings_to_rules_and_results() {
+        let findings = vec![Finding::new(
+            Severity::High,
+            "package-lock.json:node_modules/reactt",
+            "possible_typosquat",
+            "Package name is close to a popular package.",
+            Some("candidate=react".to_string()),
+        )];
+        let report = ReportOutput {
+            tool: "mcaifee",
+            mode: "report",
+            scope: vec!["reactt".to_string()],
+            decision: GateDecision::Quarantine,
+            decision_reason: "highest risk high".to_string(),
+            highest_risk: "high".to_string(),
+            summary: severity_counts(&findings),
+            finding_groups: finding_groups(&findings),
+            advisory_packages: Vec::new(),
+            package_json: None,
+            lockfiles: Vec::new(),
+            package_specs: vec!["reactt".to_string()],
+            findings,
+            sources: Vec::new(),
+            recommended_next_steps: Vec::new(),
+            paranoia: None,
+        };
+
+        let sarif = report_sarif(&report);
+
+        assert_eq!(sarif.get("version").and_then(Value::as_str), Some("2.1.0"));
+        assert_eq!(
+            sarif
+                .pointer("/runs/0/tool/driver/rules/0/id")
+                .and_then(Value::as_str),
+            Some("possible_typosquat")
+        );
+        assert_eq!(
+            sarif
+                .pointer("/runs/0/results/0/ruleId")
+                .and_then(Value::as_str),
+            Some("possible_typosquat")
+        );
+        assert_eq!(
+            sarif
+                .pointer("/runs/0/results/0/level")
+                .and_then(Value::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            sarif
+                .pointer("/runs/0/invocations/0/properties/decision")
+                .and_then(Value::as_str),
+            Some("quarantine")
+        );
     }
 
     #[test]

@@ -60,11 +60,11 @@ mcaifee db update
 mcaifee db status
 ```
 
-The package-manager wrapper automatically runs a source database update before gated installs when the default database is missing or older than 24 hours. User policy lives in `~/.mcaifee/config.json`, and cache data lives in `~/.mcaifee/cache/`. Use `mcaifee config init` and `mcaifee config status` to create or inspect policy. Use `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned test environments.
+The package-manager wrapper automatically runs a source database update before gated installs when the default database is missing or older than 24 hours. User policy lives in `~/.mcaifee/config.json`, and cache data lives in `~/.mcaifee/cache/`. Use `mcaifee config init --profile balanced|strict|ci|paranoid` and `mcaifee config status` to create or inspect policy. Use `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned test environments.
 
 The default minimum package version age is 7 days. Override it with `minimumVersionAgeHours` in config, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or wrapper flag `--mcaifee-min-version-age-hours`. Use `0` only for an explicit bypass of the publish-age gate.
 
-Registry allowlists and command timeout policy can also live in config. Use `allowRegistryHosts`, `MCAIFEE_ALLOW_REGISTRY_HOSTS`, `--allow-registry-host`, or wrapper flag `--mcaifee-allow-registry-host` for private registries. Use `timeoutSeconds`, `MCAIFEE_TIMEOUT`, `--timeout`, or wrapper flag `--mcaifee-timeout` to cap registry, audit, and advisory queries. Use `mcaifee doctor` to verify config, cache, logs, source DB freshness, and package-manager tool availability.
+Registry allowlists and command timeout policy can also live in config. Use `allowRegistryHosts`, `MCAIFEE_ALLOW_REGISTRY_HOSTS`, `--allow-registry-host`, or wrapper flag `--mcaifee-allow-registry-host` for private registries. Use `timeoutSeconds`, `MCAIFEE_TIMEOUT`, `--timeout`, or wrapper flag `--mcaifee-timeout` to cap registry, audit, and advisory queries. Use `mcaifee doctor` to verify config, cache, logs, source DB freshness, and package-manager tool availability. Use `mcaifee doctor --fix` to create missing local config/cache/log state; add `--online` only when refreshing the source database from the network is allowed.
 
 Every invocation writes a best-effort JSONL event to `~/.mcaifee/logs/` by default, with redacted arguments, cwd, executable path, timestamps, duration, exit code, and success state. Disable with `logInvocations: false` or `MCAIFEE_LOG_INVOCATIONS=0`; override the destination with `logDir` or `MCAIFEE_LOG_DIR`. Logs are retained for 30 days by default; override with `logRetentionDays` or `MCAIFEE_LOG_RETENTION_DAYS`, and inspect them with `mcaifee logs status`, `mcaifee logs tail`, or `mcaifee logs prune`.
 
@@ -73,11 +73,12 @@ For a complete review artifact:
 ```bash
 mcaifee report --online
 mcaifee audit --online --format json
+mcaifee report --online --format json --output mcaifee-report.json --sarif mcaifee.sarif
 ```
 
 `audit` is an alias of `report`.
 
-Reports include a gate decision (`allow`, `needs_manual_review`, or `quarantine`), grouped finding summaries, and advisory package rollups when npm/pnpm audit data is available.
+Reports include a gate decision (`allow`, `needs_manual_review`, or `quarantine`), grouped finding summaries, and advisory package rollups when npm/pnpm audit data is available. Use `--output` for durable text/JSON artifacts and `--sarif` for SARIF 2.1.0 code-scanning ingestion.
 
 For proposed packages:
 
@@ -92,6 +93,8 @@ If the `mcaifee` binary or skill is not installed in a Codex session, install bo
 ```bash
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --agent-skill --path-link
 ```
+
+The installer verifies release downloads against published SHA-256 checksums by default. If `cosign` is present it also attempts keyless blob verification; pass `--cosign` when signature verification must be mandatory.
 
 For local development, use the release artifact from `https://github.com/turinglabsorg/mcaifee/releases` or run from source with `cargo run --`.
 

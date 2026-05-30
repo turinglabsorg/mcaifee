@@ -41,14 +41,22 @@ curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.
 Install a specific version, destination, or persistent shell integration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.5.2
+curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --version v0.5.3
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --install-dir /usr/local/bin --shell-init zsh
 ```
+
+Release downloads are verified against the published `.sha256` asset by default. If `cosign` is installed, the installer also attempts keyless blob verification against the release signature and certificate. Use `--cosign` to require cosign verification, or `--no-verify` only for controlled local testing.
 
 Install for Codex agent sessions, including the skill and a PATH-visible symlink for headless runs:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/turinglabsorg/mcaifee/main/install.sh | sh -s -- --agent-skill --path-link
+```
+
+Install the checked-in Homebrew formula locally:
+
+```bash
+brew install ./Formula/mcaifee.rb
 ```
 
 Or download a release binary manually:
@@ -102,6 +110,7 @@ Default config:
 
 ```json
 {
+  "policyProfile": "balanced",
   "minimumVersionAgeHours": 168,
   "sourceDbMaxAgeHours": 24,
   "failOn": "medium",
@@ -115,6 +124,17 @@ Default config:
   "sourceDbPath": null
 }
 ```
+
+Choose a policy profile when initializing config:
+
+```bash
+mcaifee config init --profile balanced
+mcaifee config init --profile strict
+mcaifee config init --profile ci
+mcaifee config init --profile paranoid
+```
+
+Profiles set conservative defaults for publish-age policy, source DB freshness, fail threshold, timeout, and log retention. Explicit command flags, environment variables, and config keys still override profile defaults.
 
 Policy precedence is command flag, environment variable, config file, then built-in default. The minimum package version age can be overridden per command:
 
@@ -160,9 +180,13 @@ Use `doctor` to verify the local install without running package lifecycle code:
 mcaifee doctor
 mcaifee doctor --format json
 mcaifee doctor --strict
+mcaifee doctor --fix
+mcaifee doctor --fix --online
 ```
 
 The health check covers config parsing, the active executable, cache/log directory writability, source database freshness, and the presence of `npm`, `pnpm`, `yarn`, `bun`, and `docker` on `PATH`. Warnings do not fail by default; `--strict` exits non-zero when warnings are present.
+
+`--fix` creates missing config, cache, and log directories using local defaults. Add `--online` only when the command may refresh the OpenSSF malicious package source database from the network.
 
 ## Wrapper Usage
 
@@ -291,6 +315,8 @@ mcaifee report
 mcaifee audit
 mcaifee report --online
 mcaifee audit --format json
+mcaifee report --format json --output mcaifee-report.json
+mcaifee report --sarif mcaifee.sarif
 ```
 
 Reports include:
@@ -305,6 +331,8 @@ Reports include:
 - Findings with severity, target, code, message, and evidence.
 - Source catalog for npm, OSV, OpenSSF, GitHub, GitLab, deps.dev, Socket.dev, Snyk, Sonatype, CISA KEV, and NVD.
 - Recommended next steps.
+
+Use `--output <path>` to write the text or JSON report to disk, and `--sarif <path>` to emit SARIF 2.1.0 findings for code-scanning systems.
 
 ## Paranoia Mode
 
@@ -416,7 +444,10 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked -- -D warnings
 cargo build --release --locked
+sh -n install.sh
+ruby -c Formula/mcaifee.rb
 ./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run
+./target/release/mcaifee report reactt --format json --output /tmp/mcaifee-report.json --sarif /tmp/mcaifee-report.sarif
 docker build -f Dockerfile.malicious-test .
 ```
 
