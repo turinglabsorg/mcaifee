@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,7 +36,7 @@ const DEFAULT_LOG_RETENTION_DAYS: i64 = 30;
     version,
     about = "Wrap npm/pnpm/yarn/bun installs with a pre-install malware gate, or audit npm package specs and lockfiles directly."
 )]
-struct Args {
+struct ScanArgs {
     #[arg(help = "npm package specs such as react@18.2.0 or @scope/pkg@1.0.0")]
     targets: Vec<String>,
 
@@ -77,6 +77,42 @@ struct Args {
         help = "Override the configured minimum package version age; 0 disables the publish-age gate"
     )]
     min_version_age_hours: Option<i64>,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "mcaifee",
+    version,
+    about = "Pre-install npm, pnpm, Yarn, and Bun malware gate.",
+    after_help = "Compatibility: `mcaifee <package-spec>` and `mcaifee --lockfile <path>` still run scan mode. Package-manager wrappers use `mcaifee npm|pnpm|yarn|bun ...`."
+)]
+struct TopLevelCli {
+    #[command(subcommand)]
+    command: Option<TopLevelCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum TopLevelCommand {
+    #[command(about = "Scan package specs, package.json manifests, and lockfiles")]
+    Scan,
+    #[command(about = "Generate a full dependency risk report")]
+    Report,
+    #[command(about = "Alias of report")]
+    Audit,
+    #[command(about = "Update or inspect the local malicious package source database")]
+    Db,
+    #[command(about = "Create or inspect user policy configuration")]
+    Config,
+    #[command(about = "Inspect, tail, or prune invocation logs")]
+    Logs,
+    #[command(about = "Check local config, cache, logs, source DB, and tool availability")]
+    Doctor,
+    #[command(about = "Print shell functions that wrap package managers")]
+    ShellInit,
+    #[command(about = "Print shell commands that disable wrapper functions")]
+    ShellDisable,
+    #[command(about = "Show whether the current shell has the Mcaifee marker")]
+    ShellStatus,
 }
 
 #[derive(Parser, Debug)]
@@ -128,7 +164,9 @@ struct DbArgs {
 
 #[derive(Subcommand, Debug)]
 enum DbCommand {
+    #[command(about = "Build or refresh the local malicious package source database")]
     Update(DbUpdateArgs),
+    #[command(about = "Show source database path, freshness, and record count")]
     Status(DbStatusArgs),
 }
 
@@ -169,7 +207,9 @@ struct ConfigArgs {
 
 #[derive(Subcommand, Debug)]
 enum ConfigCommand {
+    #[command(about = "Create the default user policy config")]
     Init(ConfigInitArgs),
+    #[command(about = "Print effective user policy and cache paths")]
     Status(ConfigStatusArgs),
 }
 
@@ -196,8 +236,11 @@ struct LogsArgs {
 
 #[derive(Subcommand, Debug)]
 enum LogsCommand {
+    #[command(about = "Show invocation log directory, retention, files, and event count")]
     Status(LogsStatusArgs),
+    #[command(about = "Print the most recent invocation log events")]
     Tail(LogsTailArgs),
+    #[command(about = "Delete invocation logs older than the retention window")]
     Prune(LogsPruneArgs),
 }
 
@@ -680,80 +723,140 @@ pub fn main() {
 }
 
 fn run_cli(raw_args: &[String]) -> i32 {
-    if let Some((package_manager, package_manager_args)) = split_wrapper_args(raw_args) {
+    if should_render_top_level_cli(raw_args) {
+        match parse_cli_args(TopLevelCli::try_parse_from(args_with_program(
+            "mcaifee", raw_args,
+        ))) {
+            Ok(cli) => run_top_level_cli(cli),
+            Err(status) => status,
+        }
+    } else if let Some((package_manager, package_manager_args)) = split_wrapper_args(raw_args) {
         run_package_manager_wrapper(package_manager, package_manager_args)
-    } else if raw_args.first().is_some_and(|arg| arg == "shell-init") {
-        let mut shell_args = vec!["mcaifee shell-init".to_string()];
-        shell_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(ShellInitArgs::try_parse_from(shell_args)) {
-            Ok(args) => run_shell_init(args),
-            Err(status) => status,
-        }
-    } else if raw_args.first().is_some_and(|arg| arg == "shell-disable") {
-        let mut shell_args = vec!["mcaifee shell-disable".to_string()];
-        shell_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(ShellDisableArgs::try_parse_from(shell_args)) {
-            Ok(args) => run_shell_disable(args),
-            Err(status) => status,
-        }
-    } else if raw_args.first().is_some_and(|arg| arg == "shell-status") {
-        run_shell_status()
-    } else if raw_args.first().is_some_and(|arg| arg == "db") {
-        let mut db_args = vec!["mcaifee db".to_string()];
-        db_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(DbArgs::try_parse_from(db_args)) {
-            Ok(args) => run_db(args),
-            Err(status) => status,
-        }
-    } else if raw_args.first().is_some_and(|arg| arg == "config") {
-        let mut config_args = vec!["mcaifee config".to_string()];
-        config_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(ConfigArgs::try_parse_from(config_args)) {
-            Ok(args) => run_config(args),
-            Err(status) => status,
-        }
-    } else if raw_args.first().is_some_and(|arg| arg == "doctor") {
-        let mut doctor_args = vec!["mcaifee doctor".to_string()];
-        doctor_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(DoctorArgs::try_parse_from(doctor_args)) {
-            Ok(args) => run_doctor(args),
-            Err(status) => status,
-        }
-    } else if raw_args.first().is_some_and(|arg| arg == "logs") {
-        if raw_args.len() == 1 {
-            return run_logs_status(LogsStatusArgs::default());
-        }
-        let mut logs_args = vec!["mcaifee logs".to_string()];
-        logs_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(LogsArgs::try_parse_from(logs_args)) {
-            Ok(args) => run_logs(args),
-            Err(status) => status,
-        }
-    } else if raw_args
-        .first()
-        .is_some_and(|arg| arg == "report" || arg == "audit")
-    {
-        let mut report_args = vec!["mcaifee report".to_string()];
-        report_args.extend(raw_args.iter().skip(1).cloned());
-        match parse_cli_args(ReportArgs::try_parse_from(report_args)) {
-            Ok(args) => run_report(args),
-            Err(status) => status,
-        }
+    } else if let Some(command) = raw_args.first().and_then(|arg| named_cli_command(arg)) {
+        run_named_cli_command(command, &raw_args[1..])
     } else {
-        let args = if raw_args.first().is_some_and(|arg| arg == "scan") {
-            let mut scan_args = vec!["mcaifee".to_string()];
-            scan_args.extend(raw_args.iter().skip(1).cloned());
-            Args::try_parse_from(scan_args)
-        } else {
-            let mut scan_args = vec!["mcaifee".to_string()];
-            scan_args.extend(raw_args.iter().cloned());
-            Args::try_parse_from(scan_args)
-        };
-        match parse_cli_args(args) {
+        match parse_cli_args(ScanArgs::try_parse_from(args_with_program(
+            "mcaifee", raw_args,
+        ))) {
             Ok(args) => run(args),
             Err(status) => status,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NamedCliCommand {
+    Scan,
+    ShellInit,
+    ShellDisable,
+    ShellStatus,
+    Db,
+    Config,
+    Doctor,
+    Logs,
+    Report,
+}
+
+fn should_render_top_level_cli(raw_args: &[String]) -> bool {
+    raw_args.is_empty()
+        || raw_args.first().is_some_and(|arg| {
+            matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help")
+        })
+}
+
+fn run_top_level_cli(cli: TopLevelCli) -> i32 {
+    if cli.command.is_none() {
+        let mut command = TopLevelCli::command();
+        if command.print_help().is_err() {
+            return 1;
+        }
+        println!();
+    }
+    0
+}
+
+fn named_cli_command(command: &str) -> Option<NamedCliCommand> {
+    match command {
+        "scan" => Some(NamedCliCommand::Scan),
+        "shell-init" => Some(NamedCliCommand::ShellInit),
+        "shell-disable" => Some(NamedCliCommand::ShellDisable),
+        "shell-status" => Some(NamedCliCommand::ShellStatus),
+        "db" => Some(NamedCliCommand::Db),
+        "config" => Some(NamedCliCommand::Config),
+        "doctor" => Some(NamedCliCommand::Doctor),
+        "logs" => Some(NamedCliCommand::Logs),
+        "report" | "audit" => Some(NamedCliCommand::Report),
+        _ => None,
+    }
+}
+
+fn run_named_cli_command(command: NamedCliCommand, command_args: &[String]) -> i32 {
+    match command {
+        NamedCliCommand::Scan => match parse_cli_args(ScanArgs::try_parse_from(args_with_program(
+            "mcaifee scan",
+            command_args,
+        ))) {
+            Ok(args) => run(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::ShellInit => match parse_cli_args(ShellInitArgs::try_parse_from(
+            args_with_program("mcaifee shell-init", command_args),
+        )) {
+            Ok(args) => run_shell_init(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::ShellDisable => match parse_cli_args(ShellDisableArgs::try_parse_from(
+            args_with_program("mcaifee shell-disable", command_args),
+        )) {
+            Ok(args) => run_shell_disable(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::ShellStatus => run_shell_status(),
+        NamedCliCommand::Db => match parse_cli_args(DbArgs::try_parse_from(args_with_program(
+            "mcaifee db",
+            command_args,
+        ))) {
+            Ok(args) => run_db(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::Config => match parse_cli_args(ConfigArgs::try_parse_from(
+            args_with_program("mcaifee config", command_args),
+        )) {
+            Ok(args) => run_config(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::Doctor => match parse_cli_args(DoctorArgs::try_parse_from(
+            args_with_program("mcaifee doctor", command_args),
+        )) {
+            Ok(args) => run_doctor(args),
+            Err(status) => status,
+        },
+        NamedCliCommand::Logs => {
+            if command_args.is_empty() {
+                return run_logs_status(LogsStatusArgs::default());
+            }
+            match parse_cli_args(LogsArgs::try_parse_from(args_with_program(
+                "mcaifee logs",
+                command_args,
+            ))) {
+                Ok(args) => run_logs(args),
+                Err(status) => status,
+            }
+        }
+        NamedCliCommand::Report => match parse_cli_args(ReportArgs::try_parse_from(
+            args_with_program("mcaifee report", command_args),
+        )) {
+            Ok(args) => run_report(args),
+            Err(status) => status,
+        },
+    }
+}
+
+fn args_with_program(program: &str, args: &[String]) -> Vec<String> {
+    let mut parsed_args = Vec::with_capacity(args.len() + 1);
+    parsed_args.push(program.to_string());
+    parsed_args.extend(args.iter().cloned());
+    parsed_args
 }
 
 fn parse_cli_args<T>(result: Result<T, clap::Error>) -> Result<T, i32> {
@@ -2923,7 +3026,7 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-fn run(args: Args) -> i32 {
+fn run(args: ScanArgs) -> i32 {
     let config = load_user_config();
     let policy = effective_policy_with_config(&config, args.min_version_age_hours);
     let allowed_hosts: HashSet<String> =
@@ -6282,6 +6385,49 @@ mod tests {
         assert_eq!(args.format, OutputFormat::Json);
         assert!(args.paranoia);
         assert_eq!(args.targets, vec!["reactt".to_string()]);
+    }
+
+    #[test]
+    fn top_level_help_lists_operational_subcommands() {
+        let help = TopLevelCli::command().render_long_help().to_string();
+
+        for expected in [
+            "scan",
+            "report",
+            "audit",
+            "db",
+            "config",
+            "logs",
+            "doctor",
+            "shell-init",
+            "shell-disable",
+            "shell-status",
+            "mcaifee npm|pnpm|yarn|bun",
+        ] {
+            assert!(
+                help.contains(expected),
+                "missing {expected} in help:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_cli_dispatch_keeps_scan_aliases_and_report_alias() {
+        assert!(should_render_top_level_cli(&[]));
+        assert!(should_render_top_level_cli(&["--help".to_string()]));
+        assert!(should_render_top_level_cli(&["help".to_string()]));
+        assert_eq!(named_cli_command("scan"), Some(NamedCliCommand::Scan));
+        assert_eq!(named_cli_command("audit"), Some(NamedCliCommand::Report));
+        assert_eq!(named_cli_command("npm"), None);
+
+        let args = ScanArgs::try_parse_from(args_with_program(
+            "mcaifee scan",
+            &["--online".to_string(), "react".to_string()],
+        ))
+        .unwrap();
+
+        assert!(args.online);
+        assert_eq!(args.targets, vec!["react".to_string()]);
     }
 
     #[test]

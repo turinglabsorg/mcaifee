@@ -51,6 +51,8 @@ For scanner-only use:
 mcaifee scan --package-json package.json --lockfile package-lock.json
 ```
 
+Use `mcaifee --help` for top-level command discovery and `mcaifee <subcommand> --help` for command-specific flags. Bare scanner usage such as `mcaifee react@18.2.0` remains supported.
+
 Refresh the local malicious-package source database when network access is allowed:
 
 ```bash

@@ -6,6 +6,7 @@
 - It audits npm package specs, `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and legacy `bun.lockb` detection.
 - It flags malware and supply-chain indicators including lifecycle install scripts, local or non-registry sources, HTTP tarballs, missing integrity hashes, Node core-module shadowing, and likely typosquats of common packages.
 - `mcaifee db update` builds a local OSV-style source database, defaulting to OpenSSF `malicious-packages`; scans emit `source_db_match` findings for exact package/version matches.
+- Top-level `mcaifee --help` lists operational subcommands while preserving legacy bare scanner usage such as `mcaifee react@18.2.0`.
 - User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
 - The default publish-age policy flags package versions newer than 7 days; override with `minimumVersionAgeHours`, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or `--mcaifee-min-version-age-hours`.
 - Wrapper mode auto-updates the default source database before gated installs when it is missing or older than 24 hours; set `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned tests.
@@ -35,7 +36,7 @@
 ## Validation
 
 - Rust validation: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and `cargo build --release --locked`.
-- Runtime smoke validation: `mcaifee doctor`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
+- Runtime smoke validation: `mcaifee --help`, `mcaifee scan --help`, `mcaifee doctor`, `mcaifee logs status`, `mcaifee logs tail --lines 1`, and `mcaifee logs prune --dry-run`.
 - Installer validation: `./install.sh --source ./target/release/mcaifee --install-dir /tmp/mcaifee-install --dry-run`.
 - Skill validation: `quick_validate.py` against the skill root.
 - Malicious npm gate test: `docker build -f Dockerfile.malicious-test .`.

@@ -73,6 +73,20 @@ cargo build --release --locked
 ./target/release/mcaifee --help
 ```
 
+## CLI Overview
+
+Top-level help lists the operational commands:
+
+```bash
+mcaifee --help
+mcaifee scan --help
+mcaifee report --help
+mcaifee logs --help
+mcaifee doctor --help
+```
+
+Bare scanner usage remains supported for compatibility, so `mcaifee react@18.2.0` is equivalent to `mcaifee scan react@18.2.0`.
+
 ## Configuration
 
 Mcaifee stores user policy in `~/.mcaifee/config.json` and cache data in `~/.mcaifee/cache/`.
