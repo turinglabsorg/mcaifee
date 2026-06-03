@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use regex::Regex;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Reverse;
@@ -550,10 +551,28 @@ struct SourceDbRecord {
     package: String,
     ecosystem: String,
     versions: Vec<String>,
+    #[serde(default)]
+    ranges: Vec<SourceDbRange>,
     severity: String,
     confidence: String,
     summary: String,
     aliases: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceDbRange {
+    range_type: String,
+    events: Vec<SourceDbRangeEvent>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceDbRangeEvent {
+    introduced: Option<String>,
+    fixed: Option<String>,
+    last_affected: Option<String>,
+    limit: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -686,6 +705,11 @@ fn node_core_modules() -> &'static HashSet<&'static str> {
         .into_iter()
         .collect()
     })
+}
+
+fn allowed_core_module_shadow_packages() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| ["punycode"].into_iter().collect())
 }
 
 fn popular_packages() -> &'static HashSet<&'static str> {
@@ -2991,6 +3015,16 @@ fn source_records_from_osv_value(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let ranges = affected_entry
+            .get("ranges")
+            .and_then(Value::as_array)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .filter_map(source_db_range_from_osv_value)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let source_url = value
             .get("references")
             .and_then(Value::as_array)
@@ -3010,6 +3044,7 @@ fn source_records_from_osv_value(
             package: package_name,
             ecosystem: "npm".to_string(),
             versions,
+            ranges,
             severity: if source_name.to_lowercase().contains("malicious") {
                 "critical".to_string()
             } else {
@@ -3021,6 +3056,44 @@ fn source_records_from_osv_value(
         });
     }
     records
+}
+
+fn source_db_range_from_osv_value(value: &Value) -> Option<SourceDbRange> {
+    let range_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("SEMVER")
+        .to_string();
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|event| {
+            Some(SourceDbRangeEvent {
+                introduced: event
+                    .get("introduced")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                fixed: event
+                    .get("fixed")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                last_affected: event
+                    .get("last_affected")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                limit: event
+                    .get("limit")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        None
+    } else {
+        Some(SourceDbRange { range_type, events })
+    }
 }
 
 fn format_command(program: &str, args: &[String]) -> String {
@@ -4722,14 +4795,7 @@ fn add_source_db_findings(
         if record.ecosystem != "npm" || record.package != package {
             continue;
         }
-        let exact_match = version.is_some_and(|version| {
-            record
-                .versions
-                .iter()
-                .any(|affected| affected == version || affected == "*")
-        });
-        let package_level_match = record.versions.is_empty();
-        if !exact_match && !package_level_match {
+        if !source_db_record_matches_version(record, version) {
             continue;
         }
         let severity = parse_severity(&record.severity).unwrap_or(Severity::High);
@@ -4756,6 +4822,92 @@ fn add_source_db_findings(
             )),
         );
     }
+}
+
+fn source_db_record_matches_version(record: &SourceDbRecord, version: Option<&str>) -> bool {
+    let Some(version) = version else {
+        return record.versions.is_empty() && record.ranges.is_empty();
+    };
+    if record
+        .versions
+        .iter()
+        .any(|affected| affected == version || affected == "*")
+    {
+        return true;
+    }
+    if record
+        .ranges
+        .iter()
+        .any(|range| source_db_range_matches_version(range, version))
+    {
+        return true;
+    }
+    record.versions.is_empty() && record.ranges.is_empty()
+}
+
+fn source_db_range_matches_version(range: &SourceDbRange, version: &str) -> bool {
+    if !range.range_type.eq_ignore_ascii_case("semver") {
+        return false;
+    }
+    let Some(version) = parse_source_db_semver(version) else {
+        return false;
+    };
+    let mut introduced: Option<Version> = None;
+    let mut active = false;
+    for event in &range.events {
+        if let Some(value) = &event.introduced {
+            introduced = parse_source_db_semver_bound(value);
+            active = true;
+        }
+        if let Some(value) = &event.fixed {
+            if active
+                && lower_bound_matches(&version, introduced.as_ref())
+                && parse_source_db_semver(value).is_some_and(|fixed| version < fixed)
+            {
+                return true;
+            }
+            introduced = None;
+            active = false;
+        }
+        if let Some(value) = &event.last_affected {
+            if active
+                && lower_bound_matches(&version, introduced.as_ref())
+                && parse_source_db_semver(value)
+                    .is_some_and(|last_affected| version <= last_affected)
+            {
+                return true;
+            }
+            introduced = None;
+            active = false;
+        }
+        if let Some(value) = &event.limit {
+            if active
+                && lower_bound_matches(&version, introduced.as_ref())
+                && parse_source_db_semver(value).is_some_and(|limit| version < limit)
+            {
+                return true;
+            }
+            introduced = None;
+            active = false;
+        }
+    }
+    active && lower_bound_matches(&version, introduced.as_ref())
+}
+
+fn lower_bound_matches(version: &Version, introduced: Option<&Version>) -> bool {
+    introduced.map_or(true, |introduced| version >= introduced)
+}
+
+fn parse_source_db_semver_bound(value: &str) -> Option<Version> {
+    if matches!(value, "0" | "*" | "") {
+        None
+    } else {
+        parse_source_db_semver(value)
+    }
+}
+
+fn parse_source_db_semver(value: &str) -> Option<Version> {
+    Version::parse(value.trim_start_matches('v')).ok()
 }
 
 fn load_json(path: &PathBuf, findings: &mut Vec<Finding>, code: &str) -> Option<Value> {
@@ -4906,7 +5058,11 @@ fn analyze_package_name(name: &str, findings: &mut Vec<Finding>, target: &str) {
         .split('/')
         .next_back()
         .unwrap_or(clean_name.as_str());
-    if node_core_modules().contains(clean_name.as_str()) || node_core_modules().contains(unscoped) {
+    if !allowed_core_module_shadow_packages().contains(clean_name.as_str())
+        && !allowed_core_module_shadow_packages().contains(unscoped)
+        && (node_core_modules().contains(clean_name.as_str())
+            || node_core_modules().contains(unscoped))
+    {
         add_finding(
             findings,
             Severity::High,
@@ -6284,12 +6440,16 @@ mod tests {
         let mut findings = Vec::new();
         analyze_package_name("reactt", &mut findings, "reactt");
         analyze_package_name("fs", &mut findings, "fs");
+        analyze_package_name("punycode", &mut findings, "punycode");
         assert!(findings
             .iter()
             .any(|finding| finding.code == "possible_typosquat"));
         assert!(findings
             .iter()
             .any(|finding| finding.code == "core_module_shadow"));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.code == "core_module_shadow" && finding.target == "punycode"));
     }
 
     #[test]
@@ -6920,6 +7080,7 @@ mod tests {
                 package: "badpkg".to_string(),
                 ecosystem: "npm".to_string(),
                 versions: vec!["1.0.0".to_string()],
+                ranges: Vec::new(),
                 severity: "critical".to_string(),
                 confidence: "confirmed".to_string(),
                 summary: "malicious install script".to_string(),
@@ -6940,6 +7101,95 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "source_db_match"
                 && finding.target.contains("badpkg-safe")));
+    }
+
+    #[test]
+    fn source_db_findings_honor_osv_semver_ranges() {
+        let source_db = SourceDb {
+            schema_version: 1,
+            updated_at: Utc::now().to_rfc3339(),
+            records: vec![SourceDbRecord {
+                source: "OpenSSF malicious-packages".to_string(),
+                source_url: "https://example.com/fsevents".to_string(),
+                advisory_id: "MAL-2023-462".to_string(),
+                package: "fsevents".to_string(),
+                ecosystem: "npm".to_string(),
+                versions: Vec::new(),
+                ranges: vec![SourceDbRange {
+                    range_type: "SEMVER".to_string(),
+                    events: vec![
+                        SourceDbRangeEvent {
+                            introduced: Some("1.0.0".to_string()),
+                            ..SourceDbRangeEvent::default()
+                        },
+                        SourceDbRangeEvent {
+                            fixed: Some("1.2.11".to_string()),
+                            ..SourceDbRangeEvent::default()
+                        },
+                    ],
+                }],
+                severity: "critical".to_string(),
+                confidence: "confirmed".to_string(),
+                summary: "Malicious code in fsevents (npm)".to_string(),
+                aliases: vec!["GHSA-xv2f-5jw4-v95m".to_string()],
+            }],
+        };
+        let mut findings = Vec::new();
+
+        add_source_db_findings(
+            Some(&source_db),
+            "fsevents",
+            Some("1.2.10"),
+            "package-lock.json:node_modules/fsevents-old",
+            &mut findings,
+        );
+        add_source_db_findings(
+            Some(&source_db),
+            "fsevents",
+            Some("2.3.3"),
+            "package-lock.json:node_modules/fsevents",
+            &mut findings,
+        );
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.target.contains("fsevents-old")));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.target.ends_with("node_modules/fsevents")));
+    }
+
+    #[test]
+    fn source_db_import_preserves_osv_semver_ranges() {
+        let advisory = serde_json::json!({
+            "id": "MAL-2023-462",
+            "summary": "Malicious code in fsevents (npm)",
+            "aliases": ["GHSA-xv2f-5jw4-v95m"],
+            "affected": [{
+                "package": {
+                    "ecosystem": "npm",
+                    "name": "fsevents"
+                },
+                "ranges": [{
+                    "type": "SEMVER",
+                    "events": [
+                        {"introduced": "1.0.0"},
+                        {"fixed": "1.2.11"}
+                    ]
+                }]
+            }]
+        });
+
+        let records = source_records_from_osv_value(
+            &advisory,
+            "OpenSSF malicious-packages",
+            Path::new("MAL-2023-462.json"),
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].package, "fsevents");
+        assert_eq!(records[0].ranges.len(), 1);
+        assert_eq!(records[0].ranges[0].events.len(), 2);
     }
 
     #[test]

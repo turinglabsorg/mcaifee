@@ -300,7 +300,7 @@ mcaifee db update --source ./malicious-packages/osv --db ./mcaifee-source-db.jso
 MCAIFEE_DB_PATH=./mcaifee-source-db.json mcaifee audit --format json
 ```
 
-The scanner matches exact package versions from lockfiles against this database and emits `source_db_match` findings with source, advisory ID, confidence, and evidence URL.
+The scanner matches exact package versions and OSV SEMVER affected ranges from lockfiles against this database and emits `source_db_match` findings with source, advisory ID, confidence, and evidence URL.
 
 Package-manager wrappers automatically refresh the default source database before gated installs when the database is missing or older than 24 hours. Set `MCAIFEE_DB_AUTO_UPDATE=0` to disable this in offline or fully pinned environments. Set `MCAIFEE_DB_PATH=/path/to/source-db.json` to use a specific cache file.
 

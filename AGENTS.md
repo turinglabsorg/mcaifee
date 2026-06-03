@@ -5,7 +5,7 @@
 - `mcaifee` is a Rust CLI wrapper and scanner for pre-install npm/pnpm/yarn/bun dependency risk checks.
 - It audits npm package specs, `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and legacy `bun.lockb` detection.
 - It flags malware and supply-chain indicators including lifecycle install scripts, local or non-registry sources, HTTP tarballs, missing integrity hashes, Node core-module shadowing, and likely typosquats of common packages.
-- `mcaifee db update` builds a local OSV-style source database, defaulting to OpenSSF `malicious-packages`; scans emit `source_db_match` findings for exact package/version matches.
+- `mcaifee db update` builds a local OSV-style source database, defaulting to OpenSSF `malicious-packages`; scans emit `source_db_match` findings for exact package/version matches and OSV SEMVER affected ranges.
 - Top-level `mcaifee --help` lists operational subcommands while preserving legacy bare scanner usage such as `mcaifee react@18.2.0`.
 - User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
 - Policy profiles `balanced`, `strict`, `ci`, and `paranoid` provide default publish-age, source DB freshness, fail threshold, timeout, and log retention settings for `mcaifee config init --profile <profile>`.
@@ -45,7 +45,7 @@
 - Bun wrapper fixture: `docker build -f Dockerfile.bun-test .`.
 - Malicious npm gate test: `docker build -f Dockerfile.malicious-test .`.
 - Lockfile parser CI: `.github/workflows/ci.yml` runs a focused matrix for npm package lock, npm shrinkwrap v1, pnpm, Yarn, Bun text lock, and Bun binary lock detection.
-- Source DB validation: unit tests cover OSV import, package-lock exact version matching, and the 24-hour wrapper refresh window.
+- Source DB validation: unit tests cover OSV import, package-lock exact version matching, OSV SEMVER range matching, and the 24-hour wrapper refresh window.
 - Paranoia mode requires Docker on the host; set `MCAIFEE_PARANOIA_NETWORK=bridge` only when a networked sandbox is explicitly needed.
 
 ## Architecture
