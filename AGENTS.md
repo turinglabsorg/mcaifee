@@ -10,6 +10,7 @@
 - User policy lives in `~/.mcaifee/config.json`, with cache data under `~/.mcaifee/cache/`.
 - Policy profiles `balanced`, `strict`, `ci`, and `paranoid` provide default publish-age, source DB freshness, fail threshold, timeout, and log retention settings for `mcaifee config init --profile <profile>`.
 - The default publish-age policy flags package versions newer than 7 days; override with `minimumVersionAgeHours`, `MCAIFEE_MIN_VERSION_AGE_HOURS`, `--min-version-age-hours`, or `--mcaifee-min-version-age-hours`.
+- Reviewed lifecycle-script packages can be approved explicitly without lowering `failOn`: use `approvedLifecyclePackages` in config, `MCAIFEE_APPROVED_LIFECYCLE_PACKAGES`, `--allow-lifecycle-package` for scan/report, or `--mcaifee-allow-lifecycle-package` for wrapper commands. Approved lifecycle findings stay visible as `info`; high/critical findings are never downgraded.
 - Wrapper mode auto-updates the default source database before gated installs when it is missing or older than 24 hours; set `MCAIFEE_DB_AUTO_UPDATE=0` only for offline or pinned tests.
 - `--online` uses `npm view` for registry metadata and npm/pnpm advisory audit for supported lockfiles without executing package code.
 - `--fail-on <severity>` exits with status `2` when findings meet or exceed the configured threshold.
