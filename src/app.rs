@@ -65,6 +65,12 @@ struct ScanArgs {
     )]
     allow_registry_host: Vec<String>,
 
+    #[arg(
+        long = "allow-lifecycle-package",
+        help = "Approved package name whose lifecycle script has been manually reviewed; repeat per package"
+    )]
+    allow_lifecycle_package: Vec<String>,
+
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
 
@@ -121,6 +127,12 @@ struct ReportArgs {
         help = "Allowed registry hostname for resolved tarballs; repeat for private registries"
     )]
     allow_registry_host: Vec<String>,
+
+    #[arg(
+        long = "allow-lifecycle-package",
+        help = "Approved package name whose lifecycle script has been manually reviewed; repeat per package"
+    )]
+    allow_lifecycle_package: Vec<String>,
 
     #[arg(long, help = "Timeout in seconds for each npm view call")]
     timeout: Option<u64>,
@@ -584,6 +596,7 @@ struct UserConfig {
     fail_on: Option<Severity>,
     auto_update_source_db: Option<bool>,
     allow_registry_hosts: Option<Vec<String>>,
+    approved_lifecycle_packages: Option<Vec<String>>,
     timeout_seconds: Option<u64>,
     log_invocations: Option<bool>,
     log_dir: Option<PathBuf>,
@@ -592,9 +605,19 @@ struct UserConfig {
     source_db_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Policy {
     minimum_version_age_hours: i64,
+    approved_lifecycle_packages: HashSet<String>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            minimum_version_age_hours: DEFAULT_MINIMUM_VERSION_AGE_HOURS,
+            approved_lifecycle_packages: HashSet::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1480,6 +1503,20 @@ fn run_config_status(args: ConfigStatusArgs) -> i32 {
         "minimumVersionAgeHours: {}",
         policy.minimum_version_age_hours
     );
+    let mut approved_lifecycle_packages = policy
+        .approved_lifecycle_packages
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    approved_lifecycle_packages.sort();
+    println!(
+        "approvedLifecyclePackages: {}",
+        if approved_lifecycle_packages.is_empty() {
+            "(none)".to_string()
+        } else {
+            approved_lifecycle_packages.join(", ")
+        }
+    );
     println!("failOn: {}", fail_threshold_with_config(&config).as_str());
     println!(
         "autoUpdateSourceDb: {}",
@@ -2050,7 +2087,11 @@ fn run_package_manager_wrapper(package_manager: &str, package_manager_args: &[St
     let threshold = wrapper_options
         .fail_on
         .unwrap_or_else(|| fail_threshold_with_config(&config));
-    let policy = effective_policy_with_config(&config, wrapper_options.min_version_age_hours);
+    let policy = effective_policy_with_overrides(
+        &config,
+        wrapper_options.min_version_age_hours,
+        &wrapper_options.allow_lifecycle_packages,
+    );
     let allowed_hosts: HashSet<String> =
         allowed_registry_hosts_with_config(&config, &wrapper_options.allow_registry_hosts)
             .into_iter()
@@ -2092,6 +2133,7 @@ struct WrapperOptions {
     fail_on: Option<Severity>,
     min_version_age_hours: Option<i64>,
     allow_registry_hosts: Vec<String>,
+    allow_lifecycle_packages: Vec<String>,
     timeout_seconds: Option<u64>,
 }
 
@@ -2122,6 +2164,13 @@ fn parse_wrapper_options(package_manager_args: &[String]) -> (WrapperOptions, Ve
         } else if arg == "--mcaifee-allow-registry-host" {
             if let Some(value) = package_manager_args.get(index + 1) {
                 options.allow_registry_hosts.push(value.to_string());
+                index += 1;
+            }
+        } else if let Some(value) = arg.strip_prefix("--mcaifee-allow-lifecycle-package=") {
+            options.allow_lifecycle_packages.push(value.to_string());
+        } else if arg == "--mcaifee-allow-lifecycle-package" {
+            if let Some(value) = package_manager_args.get(index + 1) {
+                options.allow_lifecycle_packages.push(value.to_string());
                 index += 1;
             }
         } else if let Some(value) = arg.strip_prefix("--mcaifee-timeout=") {
@@ -2197,6 +2246,14 @@ fn effective_policy_with_config(
     config: &UserConfig,
     min_version_age_hours_override: Option<i64>,
 ) -> Policy {
+    effective_policy_with_overrides(config, min_version_age_hours_override, &[])
+}
+
+fn effective_policy_with_overrides(
+    config: &UserConfig,
+    min_version_age_hours_override: Option<i64>,
+    allow_lifecycle_packages: &[String],
+) -> Policy {
     let profile = policy_profile_defaults_with_config(config);
     let minimum_version_age_hours = min_version_age_hours_override
         .or_else(|| {
@@ -2210,6 +2267,42 @@ fn effective_policy_with_config(
 
     Policy {
         minimum_version_age_hours,
+        approved_lifecycle_packages: approved_lifecycle_packages_with_config(
+            config,
+            allow_lifecycle_packages,
+        ),
+    }
+}
+
+fn approved_lifecycle_packages_with_config(
+    config: &UserConfig,
+    allow_lifecycle_packages: &[String],
+) -> HashSet<String> {
+    let mut packages = HashSet::new();
+    if let Some(config_packages) = &config.approved_lifecycle_packages {
+        packages.extend(
+            config_packages
+                .iter()
+                .filter_map(|name| normalize_package_name(name.as_str())),
+        );
+    }
+    if let Ok(env_packages) = env::var("MCAIFEE_APPROVED_LIFECYCLE_PACKAGES") {
+        packages.extend(env_packages.split(',').filter_map(normalize_package_name));
+    }
+    packages.extend(
+        allow_lifecycle_packages
+            .iter()
+            .filter_map(|name| normalize_package_name(name)),
+    );
+    packages
+}
+
+fn normalize_package_name(name: &str) -> Option<String> {
+    let trimmed = name.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_lowercase())
     }
 }
 
@@ -2490,7 +2583,13 @@ fn collect_project_and_spec_findings(
 
     for lockfile in lockfiles_for_package_manager(package_manager) {
         if lockfile.exists() {
-            analyze_lockfile(&lockfile, &mut findings, allowed_hosts, source_db.as_ref());
+            analyze_lockfile_with_policy(
+                &lockfile,
+                &mut findings,
+                allowed_hosts,
+                source_db.as_ref(),
+                policy,
+            );
         }
     }
 
@@ -2795,6 +2894,7 @@ fn default_config_file_for_profile(profile: PolicyProfile) -> UserConfig {
         fail_on: Some(defaults.fail_on),
         auto_update_source_db: Some(defaults.auto_update_source_db),
         allow_registry_hosts: Some(vec!["registry.npmjs.org".to_string()]),
+        approved_lifecycle_packages: Some(Vec::new()),
         timeout_seconds: Some(defaults.timeout_seconds),
         log_invocations: Some(true),
         log_dir: Some(PathBuf::from("~/.mcaifee/logs")),
@@ -3068,25 +3168,23 @@ fn source_db_range_from_osv_value(value: &Value) -> Option<SourceDbRange> {
         .get("events")
         .and_then(Value::as_array)?
         .iter()
-        .filter_map(|event| {
-            Some(SourceDbRangeEvent {
-                introduced: event
-                    .get("introduced")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                fixed: event
-                    .get("fixed")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                last_affected: event
-                    .get("last_affected")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                limit: event
-                    .get("limit")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            })
+        .map(|event| SourceDbRangeEvent {
+            introduced: event
+                .get("introduced")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            fixed: event
+                .get("fixed")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            last_affected: event
+                .get("last_affected")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            limit: event
+                .get("limit")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
         .collect::<Vec<_>>();
     if events.is_empty() {
@@ -3240,7 +3338,11 @@ fn shell_quote(value: &str) -> String {
 
 fn run(args: ScanArgs) -> i32 {
     let config = load_user_config();
-    let policy = effective_policy_with_config(&config, args.min_version_age_hours);
+    let policy = effective_policy_with_overrides(
+        &config,
+        args.min_version_age_hours,
+        &args.allow_lifecycle_package,
+    );
     let allowed_hosts: HashSet<String> =
         allowed_registry_hosts_with_config(&config, &args.allow_registry_host)
             .into_iter()
@@ -3269,7 +3371,13 @@ fn run(args: ScanArgs) -> i32 {
     if let Some(path) = &args.lockfile {
         scopes.push(path.display().to_string());
         if path.exists() {
-            analyze_lockfile(path, &mut findings, &allowed_hosts, source_db.as_ref());
+            analyze_lockfile_with_policy(
+                path,
+                &mut findings,
+                &allowed_hosts,
+                source_db.as_ref(),
+                &policy,
+            );
             if args.online {
                 analyze_lockfile_cve_audit(path, &mut findings, &allowed_hosts, timeout);
             }
@@ -3351,7 +3459,11 @@ fn run(args: ScanArgs) -> i32 {
 
 fn run_report(args: ReportArgs) -> i32 {
     let config = load_user_config();
-    let policy = effective_policy_with_config(&config, args.min_version_age_hours);
+    let policy = effective_policy_with_overrides(
+        &config,
+        args.min_version_age_hours,
+        &args.allow_lifecycle_package,
+    );
     let allowed_hosts: HashSet<String> =
         allowed_registry_hosts_with_config(&config, &args.allow_registry_host)
             .into_iter()
@@ -3378,7 +3490,13 @@ fn run_report(args: ReportArgs) -> i32 {
     for lockfile in lockfiles {
         if lockfile.exists() {
             scope.push(lockfile.display().to_string());
-            analyze_lockfile(&lockfile, &mut findings, &allowed_hosts, source_db.as_ref());
+            analyze_lockfile_with_policy(
+                &lockfile,
+                &mut findings,
+                &allowed_hosts,
+                source_db.as_ref(),
+                &policy,
+            );
             if args.online {
                 analyze_lockfile_cve_audit(&lockfile, &mut findings, &allowed_hosts, timeout);
             }
@@ -3974,6 +4092,7 @@ fn analyze_text_lockfile_signals(
     findings: &mut Vec<Finding>,
     allowed_hosts: &HashSet<String>,
     source_db: Option<&SourceDb>,
+    policy: &Policy,
 ) {
     let mut seen_names: HashMap<String, usize> = HashMap::new();
     for package in signals.packages {
@@ -4014,13 +4133,11 @@ fn analyze_text_lockfile_signals(
             );
         }
         if package.install_script {
-            add_finding(
+            add_lockfile_install_script_finding(
                 findings,
-                Severity::Medium,
+                package.name.as_deref(),
                 &package.target,
-                "lockfile_install_script",
-                "Lockfile marks this package as having an install lifecycle script.",
-                None,
+                policy,
             );
         }
         if package.has_bin {
@@ -4780,6 +4897,37 @@ fn add_finding(
     findings.push(Finding::new(severity, target, code, message, evidence));
 }
 
+fn add_lockfile_install_script_finding(
+    findings: &mut Vec<Finding>,
+    package_name: Option<&str>,
+    target: &str,
+    policy: &Policy,
+) {
+    let normalized_name = package_name.and_then(normalize_package_name);
+    if normalized_name
+        .as_ref()
+        .is_some_and(|name| policy.approved_lifecycle_packages.contains(name))
+    {
+        add_finding(
+            findings,
+            Severity::Info,
+            target,
+            "lockfile_install_script",
+            "Lockfile package has an install lifecycle script approved by policy.",
+            normalized_name.map(|name| format!("approved package: {name}")),
+        );
+    } else {
+        add_finding(
+            findings,
+            Severity::Medium,
+            target,
+            "lockfile_install_script",
+            "Lockfile marks this package as having an install lifecycle script.",
+            None,
+        );
+    }
+}
+
 fn add_source_db_findings(
     source_db: Option<&SourceDb>,
     name: &str,
@@ -4895,7 +5043,7 @@ fn source_db_range_matches_version(range: &SourceDbRange, version: &str) -> bool
 }
 
 fn lower_bound_matches(version: &Version, introduced: Option<&Version>) -> bool {
-    introduced.map_or(true, |introduced| version >= introduced)
+    introduced.is_none_or(|introduced| version >= introduced)
 }
 
 fn parse_source_db_semver_bound(value: &str) -> Option<Version> {
@@ -5371,6 +5519,7 @@ fn analyze_lock_package(
     findings: &mut Vec<Finding>,
     allowed_hosts: &HashSet<String>,
     source_db: Option<&SourceDb>,
+    policy: &Policy,
 ) {
     analyze_package_name(name, findings, target);
     let version = meta.get("version").and_then(Value::as_str);
@@ -5393,14 +5542,7 @@ fn analyze_lock_package(
         }
     }
     if meta.get("hasInstallScript").and_then(Value::as_bool) == Some(true) {
-        add_finding(
-            findings,
-            Severity::Medium,
-            target,
-            "lockfile_install_script",
-            "Lockfile marks this package as having an install lifecycle script.",
-            None,
-        );
+        add_lockfile_install_script_finding(findings, Some(name), target, policy);
     }
     if let Some(deprecated) = meta.get("deprecated") {
         if !deprecated.is_null() && deprecated != &Value::Bool(false) {
@@ -5426,11 +5568,22 @@ fn analyze_lock_package(
     }
 }
 
+#[cfg(test)]
 fn analyze_lockfile(
     path: &PathBuf,
     findings: &mut Vec<Finding>,
     allowed_hosts: &HashSet<String>,
     source_db: Option<&SourceDb>,
+) {
+    analyze_lockfile_with_policy(path, findings, allowed_hosts, source_db, &Policy::default());
+}
+
+fn analyze_lockfile_with_policy(
+    path: &PathBuf,
+    findings: &mut Vec<Finding>,
+    allowed_hosts: &HashSet<String>,
+    source_db: Option<&SourceDb>,
+    policy: &Policy,
 ) {
     if is_bun_binary_lockfile(path) {
         add_finding(
@@ -5445,7 +5598,7 @@ fn analyze_lockfile(
     }
     if !is_npm_json_lockfile(path) {
         if let Some(signals) = parse_text_lockfile_signals(path, allowed_hosts) {
-            analyze_text_lockfile_signals(signals, findings, allowed_hosts, source_db);
+            analyze_text_lockfile_signals(signals, findings, allowed_hosts, source_db, policy);
         } else {
             add_finding(
                 findings,
@@ -5490,21 +5643,33 @@ fn analyze_lockfile(
             );
             if let Some(name) = package_name_from_lock_path(lock_path) {
                 *seen_names.entry(name.clone()).or_default() += 1;
-                analyze_lock_package(&name, meta, &target, findings, allowed_hosts, source_db);
+                analyze_lock_package(
+                    &name,
+                    meta,
+                    &target,
+                    findings,
+                    allowed_hosts,
+                    source_db,
+                    policy,
+                );
             } else {
                 analyze_scripts(meta.get("scripts"), findings, &target);
             }
         }
     }
     if let Some(dependencies) = root.get("dependencies").and_then(Value::as_object) {
+        let context = LockfileAnalysisContext {
+            allowed_hosts,
+            source_db,
+            policy,
+        };
         analyze_lockfile_v1_dependencies(
             path,
             dependencies,
             findings,
-            allowed_hosts,
             &mut seen_names,
             "",
-            source_db,
+            &context,
         );
     }
     for (name, count) in seen_names {
@@ -5521,14 +5686,19 @@ fn analyze_lockfile(
     }
 }
 
+struct LockfileAnalysisContext<'a> {
+    allowed_hosts: &'a HashSet<String>,
+    source_db: Option<&'a SourceDb>,
+    policy: &'a Policy,
+}
+
 fn analyze_lockfile_v1_dependencies(
     path: &PathBuf,
     dependencies: &serde_json::Map<String, Value>,
     findings: &mut Vec<Finding>,
-    allowed_hosts: &HashSet<String>,
     seen_names: &mut HashMap<String, usize>,
     prefix: &str,
-    source_db: Option<&SourceDb>,
+    context: &LockfileAnalysisContext<'_>,
 ) {
     for (name, meta) in dependencies {
         let Some(meta) = meta.as_object() else {
@@ -5536,16 +5706,23 @@ fn analyze_lockfile_v1_dependencies(
         };
         *seen_names.entry(name.clone()).or_default() += 1;
         let target = format!("{}:dependencies.{}{}", path.display(), prefix, name);
-        analyze_lock_package(name, meta, &target, findings, allowed_hosts, source_db);
+        analyze_lock_package(
+            name,
+            meta,
+            &target,
+            findings,
+            context.allowed_hosts,
+            context.source_db,
+            context.policy,
+        );
         if let Some(nested) = meta.get("dependencies").and_then(Value::as_object) {
             analyze_lockfile_v1_dependencies(
                 path,
                 nested,
                 findings,
-                allowed_hosts,
                 seen_names,
                 &format!("{prefix}{name}."),
-                source_db,
+                context,
             );
         }
     }
@@ -6544,6 +6721,7 @@ mod tests {
             "--mcaifee-fail-on=critical".to_string(),
             "--mcaifee-min-version-age-hours=72".to_string(),
             "--mcaifee-allow-registry-host=registry.example.com".to_string(),
+            "--mcaifee-allow-lifecycle-package=sharp".to_string(),
             "--mcaifee-timeout=7".to_string(),
             "vite".to_string(),
         ];
@@ -6557,6 +6735,7 @@ mod tests {
             options.allow_registry_hosts,
             vec!["registry.example.com".to_string()]
         );
+        assert_eq!(options.allow_lifecycle_packages, vec!["sharp".to_string()]);
         assert_eq!(options.timeout_seconds, Some(7));
         assert_eq!(forwarded, vec!["install".to_string(), "vite".to_string()]);
     }
@@ -7261,6 +7440,7 @@ mod tests {
         });
         let policy = Policy {
             minimum_version_age_hours: 168,
+            ..Policy::default()
         };
         let mut findings = Vec::new();
 
@@ -7281,6 +7461,7 @@ mod tests {
         });
         let policy = Policy {
             minimum_version_age_hours: 0,
+            ..Policy::default()
         };
         let mut findings = Vec::new();
 
@@ -7384,6 +7565,53 @@ mod tests {
             .target
             .contains("dependencies.parent.badpkg")
             && finding.code == "lockfile_install_script"));
+    }
+
+    #[test]
+    fn approved_lifecycle_packages_downgrade_lockfile_script_findings_to_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("package-lock.json");
+        write!(
+            fs::File::create(&lock_path).unwrap(),
+            r#"{{
+                "lockfileVersion": 3,
+                "packages": {{
+                    "": {{"name": "demo"}},
+                    "node_modules/sharp": {{
+                        "version": "0.34.5",
+                        "resolved": "https://registry.npmjs.org/sharp/-/sharp-0.34.5.tgz",
+                        "integrity": "sha512-test",
+                        "hasInstallScript": true
+                    }},
+                    "node_modules/unknown-installer": {{
+                        "version": "1.0.0",
+                        "resolved": "https://registry.npmjs.org/unknown-installer/-/unknown-installer-1.0.0.tgz",
+                        "integrity": "sha512-test",
+                        "hasInstallScript": true
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+        let allowed_hosts = HashSet::from(["registry.npmjs.org".to_string()]);
+        let policy = Policy {
+            approved_lifecycle_packages: HashSet::from(["sharp".to_string()]),
+            ..Policy::default()
+        };
+        let mut findings = Vec::new();
+
+        analyze_lockfile_with_policy(&lock_path, &mut findings, &allowed_hosts, None, &policy);
+
+        assert!(findings.iter().any(|finding| {
+            finding.target.ends_with("node_modules/sharp")
+                && finding.code == "lockfile_install_script"
+                && finding.severity == Severity::Info
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.target.ends_with("node_modules/unknown-installer")
+                && finding.code == "lockfile_install_script"
+                && finding.severity == Severity::Medium
+        }));
     }
 
     #[test]

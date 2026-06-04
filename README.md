@@ -116,6 +116,7 @@ Default config:
   "failOn": "medium",
   "autoUpdateSourceDb": true,
   "allowRegistryHosts": ["registry.npmjs.org"],
+  "approvedLifecyclePackages": [],
   "timeoutSeconds": 20,
   "logInvocations": true,
   "logDir": "~/.mcaifee/logs",
@@ -144,6 +145,23 @@ mcaifee npm install react --mcaifee-min-version-age-hours 72
 ```
 
 Set `minimumVersionAgeHours` to `0`, or pass `--min-version-age-hours 0`, to disable the publish-age gate for that scope.
+
+Lifecycle install scripts remain `medium` findings until explicitly approved. After reviewing a package's install script, tarball source, integrity, maintainers, and provenance, approve only that package by name:
+
+```json
+{
+  "approvedLifecyclePackages": ["@parcel/watcher", "@swc/core", "fsevents", "sharp"]
+}
+```
+
+For a single command, use:
+
+```bash
+mcaifee report --allow-lifecycle-package sharp
+mcaifee npm install --mcaifee-allow-lifecycle-package sharp
+```
+
+Approved lifecycle findings are still reported as `info` for auditability. High and critical findings are never lowered by lifecycle approvals.
 
 ## Invocation Logs
 
@@ -240,6 +258,7 @@ By default the wrapper blocks when findings reach `medium` severity. Override th
 mcaifee npm install --mcaifee-fail-on high
 mcaifee npm install --mcaifee-fail-on critical
 mcaifee npm install --mcaifee-allow-registry-host registry.example.com
+mcaifee npm install --mcaifee-allow-lifecycle-package sharp
 mcaifee npm install --mcaifee-timeout 45
 ```
 

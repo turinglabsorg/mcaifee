@@ -137,7 +137,7 @@ docker build -f Dockerfile.malicious-test .
 
 5. Harden the install path:
    - Prefer `mcaifee npm ci` or `mcaifee npm install --paranoia` for first pass dependency materialization.
-   - Approve lifecycle scripts package-by-package only when their purpose is understood.
+   - Approve lifecycle scripts package-by-package only when their purpose is understood, using `approvedLifecyclePackages` in config or `--mcaifee-allow-lifecycle-package <name>` for a wrapper command.
    - Commit lockfile changes and review `resolved`, `integrity`, and `hasInstallScript` diffs.
    - Pin direct dependencies when risk is elevated.
    - Use private registry allowlists for production builds when available.
