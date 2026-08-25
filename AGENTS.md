@@ -15,6 +15,7 @@
 - `--online` uses `npm view` for registry metadata and npm/pnpm advisory audit for supported lockfiles without executing package code.
 - `--fail-on <severity>` exits with status `2` when findings meet or exceed the configured threshold.
 - Wrapper mode supports `mcaifee npm ...`, `mcaifee pnpm ...`, `mcaifee yarn ...`, and `mcaifee bun ...`.
+- Global installs (`npm i -g`, `--global`, `--location=global`, `pnpm add -g`, `yarn global add`) skip project lockfile staging and project manifest scans; the gate still inspects the requested package spec. `--paranoia` is skipped because the Docker sandbox is project-based.
 - Internal npm staging and npm registry metadata calls use an isolated temporary npm cache/log directory so user `~/.npm` permission problems do not affect the gate.
 - Shell integration supports `mcaifee shell-init`, `mcaifee shell-disable`, and `mcaifee shell-status` so plain `npm`, `pnpm`, `yarn`, and `bun` calls can be wrapped in the current shell.
 - Report mode supports `mcaifee report` and alias `mcaifee audit`, with text or JSON output, `--output`, `--sarif`, gate decisions, grouped finding summaries, and advisory package rollups.

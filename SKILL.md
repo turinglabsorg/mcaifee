@@ -26,7 +26,10 @@ mcaifee npm install left-pad
 mcaifee pnpm add react
 mcaifee yarn add vite
 mcaifee bun add zod
+mcaifee npm i -g cline
 ```
+
+Global installs (`npm i -g`, `pnpm add -g`, `yarn global add`) skip project lockfile staging and scan only the requested package spec.
 
 To wrap plain package-manager commands in the current shell:
 
