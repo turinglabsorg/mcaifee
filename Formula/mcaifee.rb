@@ -1,24 +1,24 @@
 class Mcaifee < Formula
   desc "Pre-install npm, pnpm, Yarn, and Bun malware gate"
   homepage "https://github.com/turinglabsorg/mcaifee"
-  version "0.5.3"
+  version "0.5.4"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.3/mcaifee-macos-aarch64"
-      sha256 "60da5b6c3e8cf8dea1e5384450106d0fa1fc2c5b1431a688b534e24c23f8ef57"
+      url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.4/mcaifee-macos-aarch64"
+      sha256 "7cabc30b180bd0ebb8deb53ae74168da4df6c61be27ac7a01b8aca869134ed46"
     end
 
     on_intel do
-      url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.3/mcaifee-macos-x86_64"
-      sha256 "78ff10e588b43b867697163d4d92c21f138ea4a872eafb83cfbbd6ac4e7f6d26"
+      url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.4/mcaifee-macos-x86_64"
+      sha256 "b92cd6fa9cee5209e9af9ce52a7cf5af1f54913ce854ff88cab83f225c8f8839"
     end
   end
 
   on_linux do
-    url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.3/mcaifee-linux-x86_64"
-    sha256 "15537f5e922fdb38b205ee11db4f5fdd5dfd0f005c992c025649628e0a7d9d51"
+    url "https://github.com/turinglabsorg/mcaifee/releases/download/v0.5.4/mcaifee-linux-x86_64"
+    sha256 "2e7122bfeb7babfd212be26991960942e926702c6e1108312a357fcc1ff0f8a9"
   end
 
   def install
